@@ -2199,6 +2199,49 @@ def avg_pool2d(input: Tensor,
 
     return output
 
+def conv1d(input: Tensor,
+           weight: Tensor,
+           bias: Optional[Tensor] = None,
+           stride: int = 1,
+           padding: int = 0,
+           dilation: int = 1,
+           groups: int = 1) -> Tensor:
+
+    noutput = weight.size()[0]
+    kernel_size = weight.size()[-2]
+    is_weight_constant = (weight.producer is not None
+                          and weight.producer.type == trt.LayerType.CONSTANT)
+    weight = weight.producer.weights if is_weight_constant else trt.Weights()
+
+    if bias is not None:
+        is_bias_constant = (bias.producer is not None
+                            and bias.producer.type == trt.LayerType.CONSTANT)
+        bias = bias.producer.weights if is_bias_constant else trt.Weights()
+
+    input_shuffle_layer = default_trtnet().add_shuffle(input.trt_tensor)
+    input_shuffle_layer.reshape_dims = trt.Dims([*(input.size()), 1])
+    input_shuffled = _create_tensor(input_shuffle_layer.get_output(0), input_shuffle_layer)
+    
+    kernel_size = trt.Dims([kernel_size, 1])
+    
+    layer = default_trtnet().add_convolution_nd(input_shuffled.trt_tensor, noutput,
+                                                kernel_size, weight, bias)
+    layer.stride_nd = (stride, 2)
+    layer.padding_nd = (padding, 0)
+    layer.dilation = (dilation, 2)
+    layer.num_groups = groups
+
+    if not is_weight_constant:
+        layer.set_input(1, weight.trt_tensor)
+    if bias is not None and not is_bias_constant:
+        layer.set_input(2, bias.trt_tensor)
+    
+    output_2d = _create_tensor(layer.get_output(0), layer)
+    output_2d_shuffle_layer = default_trtnet().add_shuffle(output_2d.trt_tensor)
+    output_2d_shuffle_layer.reshape_dims = trt.Dims([output_2d.size()[0], output_2d.size()[1], output_2d.size()[2]])
+    output_1d = _create_tensor(output_2d_shuffle_layer.get_output(0), output_2d_shuffle_layer)
+
+    return output_1d
 
 def conv2d(input: Tensor,
            weight: Tensor,
