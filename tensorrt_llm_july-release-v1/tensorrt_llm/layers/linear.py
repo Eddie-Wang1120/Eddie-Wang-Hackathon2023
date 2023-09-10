@@ -123,12 +123,13 @@ class RowLinear(Module):
 
         self.tp_group = tp_group
         self.tp_size = tp_size
+        self.matmul_trans_weight = True
 
     def forward(self, x):
         if default_net().plugin_config.gemm_plugin:
-            x = _gemm_plugin(x, self.weight.value, transb=True)
+            x = _gemm_plugin(x, self.weight.value, transb=self.matmul_trans_weight)
         else:
-            x = matmul(x, self.weight.value, transb=True)
+            x = matmul(x, self.weight.value, transb=self.matmul_trans_weight)
 
         if self.tp_size > 1 and self.tp_group is not None:
             x = allreduce(x, self.tp_group)

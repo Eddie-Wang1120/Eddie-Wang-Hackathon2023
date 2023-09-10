@@ -52,6 +52,7 @@ class Attention(Module):
                  num_attention_heads,
                  max_position_embeddings,
                  num_layers=1,
+                 cross_attention=False,
                  apply_query_key_layer_scaling=False,
                  attention_mask_type=AttentionMaskType.padding,
                  bias=True,
@@ -103,12 +104,39 @@ class Attention(Module):
             self.register_parameter('kv_orig_quant_scale', None)
             self.register_parameter('kv_quant_orig_scale', None)
 
+        self.cross_attention = cross_attention
+
+        self.k_linear = ColumnLinear(hidden_size,
+                                hidden_size,
+                                bias=False,
+                                dtype=dtype,
+                                tp_group=tp_group,
+                                tp_size=tp_size,
+                                gather_output=False) if self.cross_attention else None
+
+        self.v_linear = ColumnLinear(hidden_size,
+                                hidden_size,
+                                bias=bias,
+                                dtype=dtype,
+                                tp_group=tp_group,
+                                tp_size=tp_size,
+                                gather_output=False) if self.cross_attention else None
+
+        self.q_linear = ColumnLinear(hidden_size,
+                                hidden_size,
+                                bias=bias,
+                                dtype=dtype,
+                                tp_group=tp_group,
+                                tp_size=tp_size,
+                                gather_output=False) if self.cross_attention else None
+
         # Note: in multi_query_mode, only query heads are split between multiple GPUs,
         # while key/value head are not split as there is only one head per key/value.
         # The output feature size is therefore (h/tp + 2) * d, where h is num_heads,
         # d is head_size, and tp is tensor_parallel_size.
         # In ColumnLinear op, the output dim is calculated by (h + 2*tp) * d / tp,
         # which matches the desired output size (h/tp + 2) * d after splitting
+        
         self.qkv = ColumnLinear(hidden_size,
                                 hidden_size *
                                 3 if not multi_query_mode else hidden_size +
@@ -117,7 +145,8 @@ class Attention(Module):
                                 dtype=dtype,
                                 tp_group=tp_group,
                                 tp_size=tp_size,
-                                gather_output=False)
+                                gather_output=False) if not self.cross_attention else None
+        
         self.dense = RowLinear(hidden_size,
                                hidden_size,
                                bias=bias,
@@ -127,6 +156,7 @@ class Attention(Module):
 
     def forward(self,
                 hidden_states: RaggedTensor,
+                xa=None,
                 attention_mask=None,
                 past_key_value=None,
                 sequence_length=None,
@@ -146,9 +176,22 @@ class Attention(Module):
         input_lengths = hidden_states.row_lengths
         max_input_length = hidden_states.max_row_length
         hidden_states = hidden_states.data
-        qkv = self.qkv(hidden_states)
+        
+        if not self.cross_attention:
+            qkv = self.qkv(hidden_states)
+        else:
+            query = self.q_linear(hidden_states)
+            key = self.k_linear(xa)
+            value = self.v_linear(xa)
+            
+        # self.register_network_output('q', query)
+        # self.register_network_output('k', key)
+        # self.register_network_output('v', value)
+        
+        # self.register_network_output('qkv', qkv)
+        # (bs, seq_len, 1024*3)
 
-        if default_net().plugin_config.gpt_attention_plugin:
+        if default_net().plugin_config.gpt_attention_plugin and not self.cross_attention:
             assert sequence_length is not None
             assert past_key_value_length is not None
             assert masked_tokens is not None
@@ -183,7 +226,7 @@ class Attention(Module):
                 self.use_int8_kv_cache,
                 kv_cache_block_pointers=kv_cache_block_pointers)
 
-        elif default_net().plugin_config.inflight_batching_gpt_attention_plugin:
+        elif default_net().plugin_config.inflight_batching_gpt_attention_plugin and not self.cross_attention:
             # The inflight batching mode
             assert inflight_batching_args is not None
             context, past_key_value = inflight_batching_gpt_attention(
@@ -238,11 +281,16 @@ class Attention(Module):
                     self.attention_head_size
                 ],
                                           dim=2)
-            else:
+            elif not self.cross_attention:
                 query, key, value = split(qkv, self.hidden_size, dim=2)
+
             query = transpose_for_scores(query)
             key = transpose_for_scores(key, is_kv=True)
             value = transpose_for_scores(value, is_kv=True)
+
+            # self.register_network_output("query", query)
+            # self.register_network_output("key", key)
+            # self.register_network_output("value", value)
 
             if past_key_value is not None:
 
@@ -298,6 +346,10 @@ class Attention(Module):
 
             key_length = shape(key, 2)
 
+            # self.register_network_output('query', query)
+            # self.register_network_output('key', key)
+            # self.register_network_output('value', value)
+
             # The following code creates a 2D tensor with 0s in the lower triangular (including the diagonal) and
             # +INF in the upper triangular parts. This bias tensor will be added to the output of the Q*K^T matrix
             # multiplication (BMM1). The +INF elements will be transformed to 0s by the Softmax operator that
@@ -333,7 +385,7 @@ class Attention(Module):
                                           cast(key, 'float32'))
 
                 attention_scores = attention_scores / self.norm_factor
-
+                # self.register_network_output('attention_scores', attention_scores)
                 if self.attention_mask_type == AttentionMaskType.causal:
                     bias = causal_mask if bias is None else bias + causal_mask
 
@@ -341,7 +393,10 @@ class Attention(Module):
                     attention_scores = attention_scores + bias
 
                 attention_probs = softmax(attention_scores, dim=-1)
-
+                # self.register_network_output('attention_probs', attention_probs)
+            # self.register_network_output('attention_scores', attention_scores)
+            # self.register_network_output('attention_probs', attention_probs)
+            # cast(attention_probs, 'float16')
             context = matmul(attention_probs, value).permute([0, 2, 1, 3])
             context = context.view(
                 concat([shape(context, 0),

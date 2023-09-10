@@ -1,11 +1,15 @@
 from typing import Dict, Iterable, Optional
 
-from ..._common import default_net
+from ..._common import default_net, precision
 from ..._utils import pad_vocab_size, str_dtype_to_trt
 
-from ...functional import gelu, transpose, constant, Tensor, RaggedTensor
-from ...layers import Linear, Conv2d, Conv1d, LayerNorm, Attention
+from ...functional import permute, cast, matmul, gelu, transpose, constant, slice, Tensor, RaggedTensor
+from ...layers import Linear, Conv2d, Conv1d, LayerNorm, Attention, Gelu, Embedding
 from ...module import Module, ModuleList
+from ...parameter import Parameter
+
+import tensorrt as trt
+from collections import OrderedDict
 
 class ResidualAttentionBlock(Module):
     def __init__(self,
@@ -15,45 +19,98 @@ class ResidualAttentionBlock(Module):
                  ):
         super().__init__()
         self.attn_ln = LayerNorm(n_state, dtype=str_dtype_to_trt("float16"))
+
+        self.attn = Attention(
+            n_state,
+            n_head,
+            1500,
+            bias=True,
+            dtype=str_dtype_to_trt("float16"),
+            
+        )
+
         self.cross_attn = (
             Attention(
                 n_state,
                 n_head,
-                1280,
+                1500,
+                cross_attention=True,
                 bias=True,
                 dtype=str_dtype_to_trt("float16")
             ) if cross_attention else None
         )
         self.cross_attn_ln = LayerNorm(n_state) if cross_attention else None
-        self.attention = Attention(
-            n_state,
-            n_head,
-            1280,
-            bias=True,
-            dtype=str_dtype_to_trt("float16"),
-        )
-        # n_mlp = n_state*4
-        # self.mlp_ln = LayerNorm(n_state)
-        # self.mlp1 = Linear(n_state, n_mlp)
-        # self.mlp2 = Linear(n_mlp, n_state)
+
+        n_mlp = n_state*4
+        self.mlp_ln = LayerNorm(n_state)
+
+        self.mlp1 = Linear(n_state, n_mlp, bias=True, dtype=str_dtype_to_trt("float16"))
+        self.mlp2 = Linear(n_mlp, n_state, bias=True, dtype=str_dtype_to_trt("float16"))
     
     def forward(self,
-                x: Tensor
+                x: RaggedTensor,
+                xa: Optional[Tensor] = None,
+                mask: Optional[Tensor] = None,
+                multi_kv_cache: Optional[Tensor] = None,
+                use_cache: Optional[bool] = False
                 ):
-        residual1 = x
-        x = self.attn_ln(x)
-        hidden_states = RaggedTensor.from_row_lengths(x,
-                                          1280,
-                                          1280)
-        x = (self.attention(hidden_states)).data
-        # x = (self.attention(hidden_states)).data + residual1
-        # residual2 = x
-        # # if self.cross_attn: TODO
-        # x = self.mlp_ln(x)
-        # x = self.mlp1(x)
-        # x = gelu(x)
-        # x = self.mlp2(x)
-        # x = x + residual2
+        row_length = x.row_lengths
+        max_row_length = x.max_row_length
+        residual1 = x.data
+        hidden_states = self.attn_ln(x.data)
+        hidden_states = RaggedTensor.from_row_lengths(hidden_states,
+                                          row_length,
+                                          max_row_length)
+        
+        # x = (self.attn(hidden_states, 
+        #                attention_mask=mask,
+        #                past_key_value=multi_kv_cache,
+        #                use_cache = use_cache
+        #                )).data + residual1
+
+        # self.register_network_output("before_mul_attn", hidden_states.data)
+        # self.register_network_output("mask", mask)
+        # self.register_network_output("kv_cache", multi_kv_cache)
+
+        attention_output = self.attn(hidden_states, 
+                       attention_mask=mask,
+                       past_key_value=multi_kv_cache,
+                       use_cache=use_cache
+                       )
+
+        if use_cache:
+            attention_output, presents = attention_output
+        
+        # self.register_network_output("after_mul_attn", attention_output.data)
+        
+        x = attention_output.data + residual1
+        
+        # self.register_network_output("after_mul_attn_add", x)
+
+        if self.cross_attn:
+            cross_residual = x
+            x = self.cross_attn_ln(x)
+            cross_hidden_states = RaggedTensor.from_row_lengths(
+                x,
+                row_length,
+                max_row_length
+            )
+            x = cross_residual + self.cross_attn(cross_hidden_states, xa=xa).data
+            
+        # self.register_network_output("after_mul_attn_add", x)
+            
+        residual2 = x
+        x = self.mlp_ln(x)
+        x = self.mlp1(x)
+        x = gelu(x)
+        x = self.mlp2(x)
+        x = x + residual2
+        x = RaggedTensor.from_row_lengths(x,
+                                          row_length,
+                                          max_row_length)
+        
+        if use_cache:
+            return (x, presents)
         return x
 
 class WhisperEncoder(Module):
@@ -72,15 +129,17 @@ class WhisperEncoder(Module):
         self.permute = transpose
         self.positional_embedding = positional_embedding
 
-        # self.blocks = ModuleList([
-        #     ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)
-        # ])
+        self.blocks = ModuleList([
+            ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)
+        ])
     
-        self.temp_block = ResidualAttentionBlock(n_state, n_head)
+        self.ln_post = LayerNorm(n_state)
     
-    def forward(self, x):
+    def forward(self, x: RaggedTensor):
         positional_embedding_buffer = constant(self.positional_embedding)
-        
+        row_length = x.row_lengths
+        max_row_length = x.max_row_length
+        x = x.data
         x = self.conv1(x)
         x = self.gelu(x)
         x = self.conv2(x)
@@ -88,7 +147,179 @@ class WhisperEncoder(Module):
         x = self.permute(x, 2, 1)
         x = x + positional_embedding_buffer
         
-        x = self.temp_block(x)
+        hidden_states = RaggedTensor.from_row_lengths(
+            x,
+            row_length,
+            max_row_length
+        )
         
-        x.mark_output('add_output', str_dtype_to_trt("float16"))
+        for block in self.blocks:
+            hidden_states = block(hidden_states)
+        x = hidden_states.data
+        x = self.ln_post(x)
+        x.mark_output('output', str_dtype_to_trt("float16"))
         return x
+    
+class WhisperDecoder(Module):
+    def __init__(self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dtype):
+        super().__init__()
+        
+        self.token_embedding = Embedding(n_vocab, n_state, dtype=dtype)
+        # self.positional_embedding = Parameter(shape=(n_ctx, n_state), dtype=dtype)
+        self.n_state = n_state
+        self.n_layer = n_layer
+        self.blocks = ModuleList([
+            ResidualAttentionBlock(n_state, n_head, cross_attention=True) for _ in range(n_layer)
+        ])
+        
+        # self.block = ResidualAttentionBlock(n_state, n_head, cross_attention=True)
+        
+        self.ln = LayerNorm(n_state)
+        
+        self.token_embedding_weight = Parameter(shape=(n_vocab, n_state), dtype=dtype)
+    
+    def forward(self, 
+                x: RaggedTensor, 
+                xa: Tensor, 
+                mask: Tensor, 
+                positional_embedding: Tensor, 
+                multi_kv_cache: list = None,
+                use_cache: bool = False):
+        
+        if use_cache:
+            presents = []
+        
+        # offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
+        embed = self.token_embedding(x.data)
+        # self.register_network_output('token', embed)
+        # hidden_states = embed + slice(self.positional_embedding.value, starts=[offset, 0], sizes=[x.data.shape[-1], self.n_state])
+        hidden_states = embed + positional_embedding
+        # self.register_network_output('after_add', hidden_states)
+        hidden_states = RaggedTensor.from_row_lengths(
+            hidden_states,
+            x.row_lengths,
+            x.max_row_length
+        )
+        
+        # self.register_network_output('before_block', hidden_states.data)
+        
+        for i, block in enumerate(self.blocks):
+            kv_cache = multi_kv_cache[i]
+            hidden_states = block(hidden_states, 
+                                   xa, 
+                                   mask=mask, 
+                                   multi_kv_cache=kv_cache,
+                                   use_cache=use_cache)
+            if use_cache:
+                presents.append(hidden_states[1])
+                hidden_states = hidden_states[0]
+
+        x = hidden_states.data
+
+        x = self.ln(x)
+        # self.register_network_output("x_ln", x)
+        x = matmul(x, self.token_embedding_weight.value, transb=True)
+
+        x.mark_output('output', str_dtype_to_trt("float16"))
+        
+        if use_cache:
+            for i, present in enumerate(presents):
+                present.mark_output(f'present_key_value_{i}', str_dtype_to_trt("float16"))
+            return (x, presents)
+        
+        return x
+    
+    def prepare_inputs(self, max_batch_size, max_input_len, max_new_tokens,
+                       use_cache, max_beam_width):
+        
+        max_output_len = max_new_tokens
+        
+        max_len = max_input_len + max_output_len
+        
+        bb_range = [1, (max_batch_size * max_beam_width + 1) // 2, max_batch_size * max_beam_width]
+        mask_len_range = [1, 1, max_len + 1]
+        inlen_range = [1, 1, max_input_len]
+        max_len_range = [0, (max_len + 1) // 2 + 1, max_len + 1]
+        
+        x = Tensor(
+            name='x',
+            dtype=trt.int32,
+            shape=[1, -1],
+            is_network_input=True,
+            dim_range=OrderedDict([
+                ('batch_size', [1]),
+                ('input_len', [inlen_range])
+            ])
+        )
+
+        input_lengths = Tensor(name='input_lengths',
+                               dtype=trt.int32,
+                               shape=[1],
+                               dim_range=OrderedDict([
+                                   ('batch_size', [1])
+                               ]))
+
+        max_input_length = Tensor(name='max_input_length',
+                                  dtype=trt.int32,
+                                  shape=[-1],
+                                  dim_range=OrderedDict([
+                                      ('max_input_len', [inlen_range])
+                                  ]))
+
+        x_ragged = RaggedTensor.from_row_lengths(
+            x,
+            input_lengths,
+            max_input_length
+        )
+        
+        mel = Tensor(
+            name='mel',
+            dtype=trt.float16,
+            shape=[1, 1500, 1280],
+            is_network_input=True,
+            dim_range=OrderedDict([
+                ('batch_size', [1]),
+                ('position_len', [1500]),
+                ('hidden_states', [1280])
+            ])
+        )
+
+        mask = Tensor(
+            name='mask',
+            dtype=trt.float32,
+            shape=[-1, -1],
+            is_network_input=True,
+            dim_range=OrderedDict([
+                ('batch_size', [bb_range]),
+                ('mask_len', [mask_len_range]),
+            ]))
+        
+        positional_embedding = Tensor(
+            name='positional_embedding',
+            dtype=trt.float16,
+            shape=[-1, 1280],
+            is_network_input=True,
+            dim_range=OrderedDict([
+                ('input_len', [inlen_range]),
+                ('hidden_states', [1280])
+            ])
+        )
+        
+        past_key_value = []
+        kv_dim_range = OrderedDict([
+                    ('batch_size', [1]),
+                    ('kv', [2]),
+                    ('num_heads', [20]),
+                    ('past_key_len', [max_len_range]),
+                    ('head_size', [64]),
+                ])
+        
+        for i in range(self.n_layer):
+            kv = Tensor(name=f'past_key_value_'+str(i),
+                    dtype=trt.float16,
+                    shape=[1, 2, 20, -1, 64],
+                    is_network_input=True,
+                    dim_range=kv_dim_range)
+            past_key_value.append(kv)
+        
+        return (x_ragged, mel, mask, positional_embedding, past_key_value, True)

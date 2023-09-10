@@ -49,7 +49,6 @@ class Conv2d(Module):
                       None if self.bias is None else self.bias.value,
                       self.stride, self.padding, self.dilation, self.groups)
 
-
 class Conv1d(Module):
 
     def __init__(
@@ -93,7 +92,6 @@ class Conv1d(Module):
         return conv1d(input, self.weight.value,
                       None if self.bias is None else self.bias.value,
                       self.stride, self.padding, self.dilation, self.groups)
-
 
 
 class ConvTranspose2d(Module):

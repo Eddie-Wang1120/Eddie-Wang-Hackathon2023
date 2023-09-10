@@ -7,8 +7,8 @@ from .gptneox.model import GPTNeoXForCausalLM, GPTNeoXModel
 from .llama.model import LLaMAForCausalLM, LLaMAModel
 from .opt.model import OPTLMHeadModel, OPTModel
 from .quantized.quant import smooth_quantize, weight_only_quantize
-from .whisper.model import WhisperEncoder
 
+from .whisper.model import WhisperEncoder, WhisperDecoder
 __all__ = [
     'BertModel',
     'BertForQuestionAnswering',
@@ -29,4 +29,5 @@ __all__ = [
     'ChatGLM6BHeadModel',
     'ChatGLM6BModel',
     'WhisperEncoder',
+    'WhisperDecoder'
 ]
