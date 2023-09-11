@@ -70,10 +70,6 @@ class MultiHeadAttention(nn.Module):
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
     ):
-        # if xa is not None:
-            # print("xa")
-            # print(x.shape)
-            # print(xa.shape)
         q = self.query(x)
 
         if kv_cache is None or xa is None or self.key not in kv_cache:
@@ -81,33 +77,10 @@ class MultiHeadAttention(nn.Module):
             # otherwise, perform key/value projections for self- or cross-attention as usual.
             k = self.key(x if xa is None else xa)
             v = self.value(x if xa is None else xa)
-            
-            # print("k")
-            # print(k)
-            # print("v")
-            # print(v)
-            # asfasfasfasf
-            
         else:
-            # print(kv_cache[self.key].shape)
-            # print(kv_cache[self.value].shape)
             # for cross-attention, calculate keys and values once and reuse in subsequent calls.
             k = kv_cache[self.key]
             v = kv_cache[self.value]
-        # if x.shape[1] == 3:
-            # print("xa")
-            # print(xa)
-            # np.save("xa.npy", xa.cpu())
-            # asdasdasd
-            # print("q")
-            # print(q.shape)
-            # print(q.view(1, 20, 3, 64))
-            # print("k")
-            # print(k.shape)
-            # print(k.view(1, 20, 3, 64))
-            # print("v")
-            # print(v.shape)
-            # print(v.view(1, 20, 3, 64))
         
         wv, qk = self.qkv_attention(q, k, v, mask)
         return self.out(wv), qk
@@ -123,20 +96,10 @@ class MultiHeadAttention(nn.Module):
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
 
         qk = q @ k
-        # print("qk")
-        # print(qk.shape)
         if mask is not None:
-            # print("mask")
-            # print(mask[:n_ctx, :n_ctx].shape)
-            # print(mask[:n_ctx, :n_ctx])
             qk = qk + mask[:n_ctx, :n_ctx]
-            # print("after mask")
-            # print(qk.shape)
         qk = qk.float()
-        # print(qk)
         w = F.softmax(qk, dim=-1).to(q.dtype)
-        # print("w")
-        # print(w)
         return (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2), qk.detach()
 
 
@@ -165,37 +128,10 @@ class ResidualAttentionBlock(nn.Module):
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
     ):  
-        # x = self.attn_ln(x)
-        # if x.shape[1] == 3:
-            # print("before_mul_attn")
-            # print(self.attn_ln(x))
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
-        # if x.shape[1] == 3:
-            # print("after mul attn")
-            # print(x)
         if self.cross_attn:
-        #     print("before cross")
-        #     print(x)
-        #     print(self.cross_attn_ln(x))
-        #     print(kv_cache)
-        #     print(self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0])
             x = x + self.cross_attn(self.cross_attn_ln(x), xa, kv_cache=kv_cache)[0]
-        # if x.shape[1] == 3:
-            # print("after cross attn")
-            # print(x)
         x = x + self.mlp(self.mlp_ln(x))
-        # if x.shape[1] == 3:
-            # print("after mlp")
-            # print(x)
-        # if self.cross_attn:
-        #     print(x)
-        #     asdasdasadsasd
-        # residual2 = x
-        # x = self.mlp_ln(x)
-        # x = self.mlp1(x)
-        # x = nn.GELU(x)
-        # x = self.mlp2(x)
-        # x = x + residual2
         return x
 
 
@@ -259,29 +195,13 @@ class TextDecoder(nn.Module):
         xa : torch.Tensor, shape = (batch_size, n_mels, n_audio_ctx)
             the encoded audio features to be attended on
         """
-        # print("decoder position")
-        # print(self.positional_embedding)
-        # print("x")
-        # print(x)
-        # print("xa")
-        # print(xa)
-
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
-        # print("offset")
-        # print(offset)
-        # print("position")
-        # print(self.positional_embedding[offset : offset + x.shape[-1]])
-        # print("token_embed")
-        # print(self.token_embedding(x))
         
         x = (
             self.token_embedding(x)
             + self.positional_embedding[offset : offset + x.shape[-1]]
         )
         x = x.to(xa.dtype)
-
-        # print("x_in")
-        # print(x)
         
         for block in self.blocks:
             x = block(x, xa, mask=self.mask, kv_cache=kv_cache)

@@ -596,6 +596,7 @@ class WhisperDecoding:
                 x = torch.tensor([[self.tokenizer.sot]] * n_audio).to(audio_features.device)  # [n_audio, 1]
             
                 logits = model.logits(x, audio_features)[:, 0]
+                # model.ca
             
                 mask = torch.ones(logits.shape[-1], dtype=torch.bool)
                 mask[list(self.tokenizer.all_language_tokens)] = False
@@ -616,7 +617,10 @@ class WhisperDecoding:
                 languages = [max(probs, key=probs.get) for probs in language_probs]
                 if self.options.language is None:
                     self.tokens[:, self.sot_index + 1] = language_tokens  # write language tokens
-
+        for hook in self.hooks:
+            hook.remove()
+        self.kv_cache = {}
+        self.hooks = []
         return languages, language_probs        
 
     def detect_language(self, audio_features):
@@ -694,7 +698,10 @@ class WhisperDecoding:
             
                 if completed or tokens.shape[-1] > self.n_ctx:
                     break
-            
+        for hook in self.hooks:
+            hook.remove()
+        self.kv_cache = {}
+        self.hooks = []
         return tokens, sum_logprobs, no_speech_probs
     
     def main_loop(self, audio_features):

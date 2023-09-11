@@ -19,6 +19,12 @@ from decoding import WhisperDecoding
 from torch_model import ModelDimensions, Whisper
 
 from datasets import load_dataset, load_metric
+from normalizers import EnglishTextNormalizer
+
+from tqdm.notebook import tqdm
+
+import pandas as pd
+import jiwer
 
 def eval_tensorrt_llm(whisper_encoding, whisper_decoding, mel):
     audio_features = whisper_encoding.get_audio_features(mel)
@@ -44,6 +50,23 @@ def eval_torch(whisper_encoding, whisper_decoding, mel, model):
     
     result = result[0]
     return result
+
+def load_dataset(dataset_dir):
+    dataset_dir = Path(dataset_dir)
+    label_file = None
+    audio_file = []
+    for file in dataset_dir.iterdir():
+        if str(file).endswith('txt'):
+            label_file = file
+        else:
+            audio_file.append(file)
+    
+    references = []
+    with open(label_file, 'r') as f:
+        for line in f:
+            references.append(line[15:-1])
+    
+    return audio_file, references
 
 def main(args):
     tensorrt_llm.logger.set_level(args.log_level)
@@ -76,18 +99,17 @@ def main(args):
     runtime_mapping = tensorrt_llm.Mapping(world_size, runtime_rank)
     torch.cuda.set_device(runtime_rank % runtime_mapping.gpus_per_node)
     
-    audio = load_audio(args.input_file)
-    audio = pad_or_trim(audio)
-    mel = log_mel_spectrogram(audio).to('cuda').type(torch.float16)
-    mel = mel.unsqueeze(0)
+    audio_files, references = load_dataset(args.dataset_dir)
     
-    model_metadata.update({'n_audio': mel.shape[0]})
-
+    audio_files = sorted(audio_files)
+    
+    model_metadata.update({'n_audio': 1})
+    
     whisper_encoding = WhisperEncoding(
         engine_dir / get_engine_name('whisper_encoder', dtype, world_size, runtime_rank),
         'float16'
     )
-    
+
     whisper_decoding = WhisperDecoding(
         engine_dir / get_engine_name('whisper_decoder', dtype, world_size, runtime_rank),
         engine_dir / get_engine_name('whsiper_crossattn', dtype, world_size, runtime_rank),
@@ -98,88 +120,66 @@ def main(args):
         model_metadata,
         positional_embedding
     )
+    output_torch = []
+    output_tensorrt_llm = []
     
-    data_label = []
-    data_label.append("This audio is for the test of NVIDIA Inference Competition 2023. The main goal of the test is to check the accuracy and the performance of the optimized Whisper model.")
+    for i, audio_file in enumerate(audio_files):
+        audio = load_audio(audio_file)
+        audio = pad_or_trim(audio)
+        mel = log_mel_spectrogram(audio).to('cuda').type(torch.float16)
+        mel = mel.unsqueeze(0)
 
-    data_idx = 0
-    if test_torch:    
-        profiler.start('torch')
-        result = eval_torch(whisper_encoding, whisper_decoding, mel, model)
-        profiler.stop('torch')
-        output_torch = []
-        output_torch.append(result.text)
-        logger.info(
-            "---------------------------------------------------------")
-        logger.info("Torch Generated : ")
-        logger.info(f" Input : {args.input_file}")
-        logger.info(f"\n Reference : {data_label[data_idx]}")
-        logger.info(f"\n Output : {output_torch[data_idx]}")
-        logger.info(
-            "---------------------------------------------------------")
+        if test_torch:    
+            profiler.start('torch')
+            result = eval_torch(whisper_encoding, whisper_decoding, mel, model)
+            profiler.stop('torch')
+            output_torch.append(result.text)
+            logger.info(
+                "---------------------------------------------------------")
+            logger.info("Torch Generated : ")
+            logger.info(f" Input : {audio_file}")
+            logger.info(f"\n Reference : {references[i]}")
+            logger.info(f"\n Output : {result.text}")
+            logger.info(
+                "---------------------------------------------------------")
 
-        
-    if test_trt_llm:    
-        profiler.start('tensorrt_llm')
-        result = eval_tensorrt_llm(whisper_encoding, whisper_decoding, mel)
-        profiler.stop('tensorrt_llm')
-        output_tensorrt_llm = []
-        output_tensorrt_llm.append(result.text)
-        logger.info(
+        if test_trt_llm:    
+            profiler.start('tensorrt_llm')
+            result = eval_tensorrt_llm(whisper_encoding, whisper_decoding, mel)
+            profiler.stop('tensorrt_llm')
+            output_tensorrt_llm.append(result.text)
+            logger.info(
+                "---------------------------------------------------------")
+            logger.info("TensorRT-LLM Generated : ")
+            logger.info(f" Input : {audio_file}")
+            logger.info(f"\n Reference : {references[i]}")
+            logger.info(f"\n Output : {result.text}")
+            logger.info(
             "---------------------------------------------------------")
-        logger.info("TensorRT-LLM Generated : ")
-        logger.info(f" Input : {args.input_file}")
-        logger.info(f"\n Reference : {data_label[data_idx]}")
-        logger.info(f"\n Output : {output_tensorrt_llm[data_idx]}")
-        logger.info(
-            "---------------------------------------------------------")
-
-    metric_tensorrt_llm = load_metric("rouge")
-    metric_torch = load_metric("rouge")
-
+            
+    normalizer = EnglishTextNormalizer()
+    
     if test_torch:
-        metric_torch.add_batch(
-            predictions=[
-                output_torch[data_idx]
-            ],
-            references=[
-                data_label[data_idx]
-            ]
-        )
-
-    if test_trt_llm:
-        metric_tensorrt_llm.add_batch(
-            predictions=[
-                output_tensorrt_llm[data_idx]
-            ],
-            references=[
-                data_label[data_idx]
-        ]
-            )
-
-    if test_torch:
-        np.random.seed(0)  # rouge score use sampling to compute the score
+        data = pd.DataFrame(dict(hypothesis=output_torch, reference=references))
+        data["hypothesis_clean"] = [normalizer(text) for text in data["hypothesis"]]
+        data["reference_clean"] = [normalizer(text) for text in data["reference"]]
+        wer = jiwer.wer(list(data["reference_clean"]), list(data["hypothesis_clean"]))
         logger.info(
             f'Torch (total latency: {profiler.elapsed_time_in_sec("torch")} sec)'
         )
         logger.info(f"Torch beam 0 result")
-        computed_metrics_torch = metric_torch.compute()
-        for key in computed_metrics_torch.keys():
-            logger.info(
-                f'  {key} : {computed_metrics_torch[key].mid[2]*100}')
+        logger.info(f"\nWER: {wer * 100:.2f} %")
 
     if test_trt_llm:
-        np.random.seed(0)  # rouge score use sampling to compute the score
+        data = pd.DataFrame(dict(hypothesis=output_tensorrt_llm, reference=references))
+        data["hypothesis_clean"] = [normalizer(text) for text in data["hypothesis"]]
+        data["reference_clean"] = [normalizer(text) for text in data["reference"]]
+        wer = jiwer.wer(list(data["reference_clean"]), list(data["hypothesis_clean"]))
         logger.info(
             f'TensorRT-LLM (total latency: {profiler.elapsed_time_in_sec("tensorrt_llm")} sec)'
         )
         logger.info(f"TensorRT-LLM beam 0 result")
-        computed_metrics_tensorrt_llm = metric_tensorrt_llm.compute()
-        for key in computed_metrics_tensorrt_llm.keys():
-            logger.info(
-                f'  {key} : {computed_metrics_tensorrt_llm[key].mid[2]*100}')
-
-
+        logger.info(f"\nWER: {wer * 100:.2f} %")
 
     
 if __name__ == '__main__':
@@ -192,7 +192,7 @@ if __name__ == '__main__':
                         default='fp16')
     parser.add_argument('--log_level', type=str, default='info')
     parser.add_argument('--engine_dir', type=str, default='./')
-    parser.add_argument('--input_file', type=str, default='./test.m4a')
+    parser.add_argument('--dataset_dir', type=str, default='./LibriSpeech/dev-clean-2/84/121550')
     parser.add_argument('--checkpoint_file', type=str, default='./large-v2.pt')
     parser.add_argument('--check_accuracy', action='store_true')
     parser.add_argument('--tensorrt_llm_rouge1_threshold',
