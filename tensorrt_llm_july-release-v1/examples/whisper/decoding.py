@@ -351,7 +351,9 @@ class WhisperDecoding:
         #     )
         # else:
         self.decoder = GreedyDecoder(self.options.temperature, self.tokenizer.eot)
-
+        
+        self.kv_cache = {}
+        self.hooks = []
 
     def _get_suppress_tokens(self) -> Tuple[int]:
         suppress_tokens = self.options.suppress_tokens
@@ -570,6 +572,44 @@ class WhisperDecoding:
 
         # # return language_tokens, language_probs
 
+    def torch_detect_language(self, model, audio_features):
+        with torch.no_grad():
+            languages = [self.options.language] * audio_features.shape[0]
+            language_probs = None
+
+            if self.options.language is None or self.options.task == "lang_id":
+                single = audio_features.ndim == 2
+                if single:
+                    audio_features = audio_features.unsqueeze(0)
+
+                # forward pass using a single token, startoftranscript
+                n_audio = audio_features.shape[0]
+                x = torch.tensor([[self.tokenizer.sot]] * n_audio).to(audio_features.device)  # [n_audio, 1]
+            
+                logits = model.logits(x, audio_features)[:, 0]
+            
+                mask = torch.ones(logits.shape[-1], dtype=torch.bool)
+                mask[list(self.tokenizer.all_language_tokens)] = False
+                logits[:, mask] = -np.inf
+                language_tokens = logits.argmax(dim=-1)
+                language_token_probs = logits.softmax(dim=-1).cpu()
+                language_probs = [
+                    {
+                        c: language_token_probs[i, j].item()
+                        for j, c in zip(self.tokenizer.all_language_tokens, self.tokenizer.all_language_codes)
+                    }
+                    for i in range(n_audio)
+                ]
+                if single:
+                    language_tokens = language_tokens[0]
+                    language_probs = language_probs[0]
+
+                languages = [max(probs, key=probs.get) for probs in language_probs]
+                if self.options.language is None:
+                    self.tokens[:, self.sot_index + 1] = language_tokens  # write language tokens
+
+        return languages, language_probs
+
     def detect_language(self, audio_features):
         languages = [self.options.language] * audio_features.shape[0]
         language_probs = None
@@ -607,6 +647,45 @@ class WhisperDecoding:
                 self.tokens[:, self.sot_index + 1] = language_tokens  # write language tokens
 
         return languages, language_probs
+    
+    def torch_main_loop(self, model, audio_features):
+        with torch.no_grad():
+            tokens = self.tokens.repeat_interleave(self.n_group, dim=0).to(audio_features.device)
+            n_batch = tokens.shape[0]
+            sum_logprobs: Tensor = torch.zeros(n_batch, device=audio_features.device)
+            no_speech_probs = [np.nan] * n_batch
+        
+            for i in range(self.sample_len):
+                if not self.kv_cache:
+                    self.kv_cache, self.hooks = model.install_kv_cache_hooks()
+            
+                past_tokens = tokens
+                if tokens.shape[-1] > self.initial_token_length:
+                    # only need to use the last token except in the first forward pass
+                    tokens = tokens[:, -1:]
+                
+                logits = model.decoder(tokens, audio_features, kv_cache=self.kv_cache)
+                tokens = past_tokens
+            
+                if (
+                    i == 0 and self.tokenizer.no_speech is not None
+                ):  # save no_speech_probs
+                    probs_at_sot = logits[:, self.sot_index].float().softmax(dim=-1)
+                    no_speech_probs = probs_at_sot[:, self.tokenizer.no_speech].tolist()
+            
+                # now we need to consider the logits at the last token only
+                logits = logits[:, -1]
+
+                # apply the logit filters, e.g. for suppressing or applying penalty to
+                for logit_filter in self.logit_filters:
+                    logit_filter.apply(logits, tokens)
+            
+                tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
+            
+                if completed or tokens.shape[-1] > self.n_ctx:
+                    break
+            
+        return tokens, sum_logprobs, no_speech_probs
     
     def main_loop(self, audio_features):
         tokens = self.tokens.repeat_interleave(self.n_group, dim=0).to(audio_features.device)

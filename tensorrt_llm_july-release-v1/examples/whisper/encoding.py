@@ -22,6 +22,11 @@ class WhisperEncoding:
         # print(session._print_io_info())
         return session 
     
+    def torch_get_audio_features(self, model, mel):
+        with torch.no_grad():
+            audio_features = model.encoder(mel)
+        return audio_features
+    
     def get_audio_features(self, mel):
         inputs = OrderedDict()
         output_list = []

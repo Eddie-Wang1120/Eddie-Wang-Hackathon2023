@@ -66,56 +66,7 @@ def load_decoder_weight(tensorrt_llm_whisper: WhisperDecoder,
                 model_params : dict,
                 n_layer : int):
     tensorrt_llm.logger.info('Loading decoder weights from PT...')
-    # tensorrt_llm_whisper.positional_embedding.value = model_params['decoder.positional_embedding'].numpy()
     tensorrt_llm_whisper.token_embedding.weight.value = model_params['decoder.token_embedding.weight'].numpy()
-
-    # tensorrt_llm_whisper.block.attn_ln.weight.value = model_params['decoder.blocks.0.attn_ln.weight'].numpy()
-    # tensorrt_llm_whisper.block.attn_ln.bias.value = model_params['decoder.blocks.0.attn_ln.bias'].numpy()
-    
-    # fused_weight = torch.cat([
-    #         model_params['decoder.blocks.0.attn.query.weight'],
-    #         model_params['decoder.blocks.0.attn.key.weight'],
-    #         model_params['decoder.blocks.0.attn.value.weight']
-    #     ],  dim=0).numpy()
-    # tensorrt_llm_whisper.block.attn.qkv.weight.value =  fused_weight
-    
-    # bias_shape = model_params['decoder.blocks.0.attn.query.bias'].shape
-    # fused_bias = torch.cat([
-    #         model_params['decoder.blocks.0.attn.query.bias'],
-    #         torch.zeros([*bias_shape], dtype=torch.float16),
-    #         model_params['decoder.blocks.0.attn.value.bias']
-    #     ],  dim=0).numpy()
-    # tensorrt_llm_whisper.block.attn.qkv.bias.value = fused_bias
-    
-    # tensorrt_llm_whisper.block.attn.dense.weight.value = model_params['decoder.blocks.0.attn.out.weight'].numpy()
-    # tensorrt_llm_whisper.block.attn.dense.bias.value = model_params['decoder.blocks.0.attn.out.bias'].numpy()
-    # tensorrt_llm_whisper.block.attn.dense.matmul_trans_weight = False
-
-    # tensorrt_llm_whisper.block.cross_attn_ln.weight.value = model_params['decoder.blocks.0.cross_attn_ln.weight'].numpy()
-    # tensorrt_llm_whisper.block.cross_attn_ln.bias.value = model_params['decoder.blocks.0.cross_attn_ln.bias'].numpy()
-
-    # tensorrt_llm_whisper.block.cross_attn.q_linear.weight.value = trans_weight(model_params['decoder.blocks.0.cross_attn.query.weight'])
-    # tensorrt_llm_whisper.block.cross_attn.q_linear.bias.value = trans_weight(model_params['decoder.blocks.0.cross_attn.query.bias'])
-
-    # tensorrt_llm_whisper.block.cross_attn.k_linear.weight.value = trans_weight(model_params['decoder.blocks.0.cross_attn.key.weight'])
-
-    # tensorrt_llm_whisper.block.cross_attn.v_linear.weight.value = trans_weight(model_params['decoder.blocks.0.cross_attn.value.weight'])
-    # tensorrt_llm_whisper.block.cross_attn.v_linear.bias.value = trans_weight(model_params['decoder.blocks.0.cross_attn.value.bias'])
-
-    # tensorrt_llm_whisper.block.cross_attn.dense.weight.value = model_params['decoder.blocks.0.cross_attn.out.weight'].numpy()
-    # tensorrt_llm_whisper.block.cross_attn.dense.bias.value = model_params['decoder.blocks.0.cross_attn.out.bias'].numpy()
-    # tensorrt_llm_whisper.block.cross_attn.dense.matmul_trans_weight = False
-
-    # tensorrt_llm_whisper.block.mlp_ln.weight.value = model_params['decoder.blocks.0.mlp_ln.weight'].numpy()
-    # tensorrt_llm_whisper.block.mlp_ln.bias.value = model_params['decoder.blocks.0.mlp_ln.bias'].numpy()
-    
-    # tensorrt_llm_whisper.block.mlp1.weight.value = trans_weight(model_params['decoder.blocks.0.mlp.0.weight'])
-    # tensorrt_llm_whisper.block.mlp1.bias.value = trans_weight(model_params['decoder.blocks.0.mlp.0.bias'])
-    #     # tensorrt_llm_whisper.blocks[0].mlp1.matmul_trans_weight = False
-
-    # tensorrt_llm_whisper.block.mlp2.weight.value = trans_weight(model_params['decoder.blocks.0.mlp.2.weight'])
-    # tensorrt_llm_whisper.block.mlp2.bias.value = trans_weight(model_params['decoder.blocks.0.mlp.2.bias'])
-
     
     for i in range(n_layer):
 
