@@ -14,6 +14,8 @@ from whisper_utils import load_audio, pad_or_trim, log_mel_spectrogram
 from encoding import WhisperEncoding
 from decoding import WhisperDecoding
 
+from tensorrt_llm.runtime.session import Session, TensorInfo
+
 import time
 
 def parse_arguments():
@@ -51,6 +53,11 @@ def generate(
     runtime_rank = tensorrt_llm.mpi_rank()
     runtime_mapping = tensorrt_llm.Mapping(world_size, runtime_rank)
     torch.cuda.set_device(runtime_rank % runtime_mapping.gpus_per_node)
+
+    # with open(engine_dir / get_engine_name('whisper_decoder', dtype, world_size, runtime_rank), 'rb') as f:
+    #     session = Session.from_serialized_engine(f.read())
+    
+    # print(session._print_io_info())
     
     audio = load_audio(input_file)
     audio = pad_or_trim(audio)
@@ -66,6 +73,7 @@ def generate(
     
     whisper_decoding = WhisperDecoding(
         engine_dir / get_engine_name('whisper_decoder', dtype, world_size, runtime_rank),
+        engine_dir / get_engine_name('whsiper_crossattn', dtype, world_size, runtime_rank),
         'float16',
         True,
         'en',

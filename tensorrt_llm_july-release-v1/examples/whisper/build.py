@@ -15,12 +15,13 @@ from tensorrt_llm import str_dtype_to_trt
 import numpy as np
 import torch
 
-from weight import load_encoder_weight, load_decoder_weight
+from weight import load_encoder_weight, load_decoder_weight, load_crossattn_linear_weight
 
 from collections import OrderedDict
 
 MODEL_ENCODER_NAME = "whisper_encoder"
 MODEL_DECODER_NAME = "whisper_decoder"
+MODEL_CROSSATTN_NAME = "whsiper_crossattn"
 
 def get_engine_name(model, dtype, tp_size, rank):
     return '{}_{}_tp{}_rank{}.engine'.format(model, dtype, tp_size, rank)
@@ -161,7 +162,55 @@ def build_decoder(model):
 
     serialize_engine(engine, os.path.join('./', engine_name))
 
+def build_crossattn_kv_linear(model):
+    model_metadata = model['dims']
+    model_params = model['model_state_dict']
+    
+    # debug
+    logger.set_level('verbose')
+
+    builder = Builder()
+
+    builder_config = builder.create_builder_config(
+        name = MODEL_ENCODER_NAME,
+        precision = 'float16'
+    )
+    
+    tensorrt_llm_whisper_crossattn = tensorrt_llm.models.CrossAttn_KV(
+        model_metadata['n_text_state'],
+        model_metadata['n_text_head'],
+        model_metadata['n_text_layer'],
+        str_dtype_to_trt('float16')
+    )
+
+    load_crossattn_linear_weight(tensorrt_llm_whisper_crossattn, model_params, model_metadata['n_text_layer'])
+
+    network = builder.create_network()
+    
+    with net_guard(network):
+        # print(tensorrt_llm_whisper.named_parameters())
+        # network.set_named_parameters(tensorrt_llm_whisper_decoder.named_parameters())
+
+        inputs = tensorrt_llm_whisper_crossattn.prepare_inputs()
+        
+        tensorrt_llm_whisper_crossattn(inputs)
+    
+        for k, v in tensorrt_llm_whisper_crossattn.named_network_outputs():
+            network._mark_output(v, k,
+                             str_dtype_to_trt('float16'))
+
+    engine = None
+    engine_name = get_engine_name(MODEL_CROSSATTN_NAME, 'float16', 1, 0)
+
+    engine = builder.build_engine(network, builder_config)
+
+    config_path = os.path.join('./', 'config.json')
+    builder.save_config(builder_config, config_path)
+
+    serialize_engine(engine, os.path.join('./', engine_name))
+
 if __name__ == '__main__':
     model = torch.load("large-v2.pt")
     build_encoder(model)
     build_decoder(model)
+    build_crossattn_kv_linear(model)

@@ -106,22 +106,6 @@ class Attention(Module):
 
         self.cross_attention = cross_attention
 
-        self.k_linear = ColumnLinear(hidden_size,
-                                hidden_size,
-                                bias=False,
-                                dtype=dtype,
-                                tp_group=tp_group,
-                                tp_size=tp_size,
-                                gather_output=False) if self.cross_attention else None
-
-        self.v_linear = ColumnLinear(hidden_size,
-                                hidden_size,
-                                bias=bias,
-                                dtype=dtype,
-                                tp_group=tp_group,
-                                tp_size=tp_size,
-                                gather_output=False) if self.cross_attention else None
-
         self.q_linear = ColumnLinear(hidden_size,
                                 hidden_size,
                                 bias=bias,
@@ -161,6 +145,7 @@ class Attention(Module):
                 past_key_value=None,
                 sequence_length=None,
                 past_key_value_length=None,
+                cross_key_value=None,
                 masked_tokens=None,
                 use_cache=False,
                 cache_indirection=None,
@@ -181,8 +166,8 @@ class Attention(Module):
             qkv = self.qkv(hidden_states)
         else:
             query = self.q_linear(hidden_states)
-            key = self.k_linear(xa)
-            value = self.v_linear(xa)
+            # key = self.k_linear(xa)
+            # value = self.v_linear(xa)
             
         # self.register_network_output('q', query)
         # self.register_network_output('k', key)
@@ -285,8 +270,9 @@ class Attention(Module):
                 query, key, value = split(qkv, self.hidden_size, dim=2)
 
             query = transpose_for_scores(query)
-            key = transpose_for_scores(key, is_kv=True)
-            value = transpose_for_scores(value, is_kv=True)
+            if cross_key_value is None:
+                key = transpose_for_scores(key, is_kv=True)
+                value = transpose_for_scores(value, is_kv=True)
 
             # self.register_network_output("query", query)
             # self.register_network_output("key", key)
@@ -318,6 +304,23 @@ class Attention(Module):
                 # FIXME(kaiyu): Remove cast after https://nvbugs/4211574 is fixed
                 key = concat([past_key, key], dim=2).cast(self.dtype)
                 value = concat([past_value, value], dim=2).cast(self.dtype)
+
+            if cross_key_value is not None:
+                # past_key_value [bs, 2, num_heads, max_seq_len, head_dim]
+                past_key, past_value = split(cross_key_value, 1, dim=1)
+
+                key_shape = concat([
+                    shape(past_key, 0),
+                    shape(past_key, 2),
+                    shape(past_key, 3),
+                    shape(past_key, 4)
+                ])
+                past_key = past_key.view(key_shape, zero_is_placeholder=False)
+                past_value = past_value.view(key_shape,
+                                             zero_is_placeholder=False)
+                # FIXME(kaiyu): Remove cast after https://nvbugs/4211574 is fixed
+                key = past_key.cast(self.dtype)
+                value = past_value.cast(self.dtype)
 
             if use_cache:
                 key_inflated_shape = concat([

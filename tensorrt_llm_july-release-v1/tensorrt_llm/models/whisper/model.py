@@ -3,7 +3,7 @@ from typing import Dict, Iterable, Optional
 from ..._common import default_net, precision
 from ..._utils import pad_vocab_size, str_dtype_to_trt
 
-from ...functional import permute, cast, matmul, gelu, transpose, constant, slice, Tensor, RaggedTensor
+from ...functional import clip, concat, view, shape, permute, cast, matmul, gelu, transpose, constant, slice, Tensor, RaggedTensor
 from ...layers import Linear, Conv2d, Conv1d, LayerNorm, Attention, Gelu, Embedding
 from ...module import Module, ModuleList
 from ...parameter import Parameter
@@ -15,6 +15,7 @@ class ResidualAttentionBlock(Module):
     def __init__(self,
                  n_state: int,
                  n_head : int,
+                 n_ctx : int,
                  cross_attention: bool = False
                  ):
         super().__init__()
@@ -23,7 +24,7 @@ class ResidualAttentionBlock(Module):
         self.attn = Attention(
             n_state,
             n_head,
-            1500,
+            n_ctx,
             bias=True,
             dtype=str_dtype_to_trt("float16"),
             
@@ -33,7 +34,7 @@ class ResidualAttentionBlock(Module):
             Attention(
                 n_state,
                 n_head,
-                1500,
+                n_ctx,
                 cross_attention=True,
                 bias=True,
                 dtype=str_dtype_to_trt("float16")
@@ -49,9 +50,9 @@ class ResidualAttentionBlock(Module):
     
     def forward(self,
                 x: RaggedTensor,
-                xa: Optional[Tensor] = None,
                 mask: Optional[Tensor] = None,
                 multi_kv_cache: Optional[Tensor] = None,
+                cross_kv_cache: Optional[Tensor] = None,
                 use_cache: Optional[bool] = False
                 ):
         row_length = x.row_lengths
@@ -95,7 +96,10 @@ class ResidualAttentionBlock(Module):
                 row_length,
                 max_row_length
             )
-            x = cross_residual + self.cross_attn(cross_hidden_states, xa=xa).data
+            # x = cross_residual + self.cross_attn(cross_hidden_states, xa=xa).data
+            x = cross_residual + self.cross_attn(
+                cross_hidden_states, 
+                cross_key_value=cross_kv_cache).data
             
         # self.register_network_output("after_mul_attn_add", x)
             
@@ -130,7 +134,7 @@ class WhisperEncoder(Module):
         self.positional_embedding = positional_embedding
 
         self.blocks = ModuleList([
-            ResidualAttentionBlock(n_state, n_head) for _ in range(n_layer)
+            ResidualAttentionBlock(n_state, n_head, n_ctx) for _ in range(n_layer)
         ])
     
         self.ln_post = LayerNorm(n_state)
@@ -169,7 +173,7 @@ class WhisperDecoder(Module):
         self.n_state = n_state
         self.n_layer = n_layer
         self.blocks = ModuleList([
-            ResidualAttentionBlock(n_state, n_head, cross_attention=True) for _ in range(n_layer)
+            ResidualAttentionBlock(n_state, n_head, n_ctx, cross_attention=True) for _ in range(n_layer)
         ])
         
         # self.block = ResidualAttentionBlock(n_state, n_head, cross_attention=True)
@@ -179,11 +183,11 @@ class WhisperDecoder(Module):
         self.token_embedding_weight = Parameter(shape=(n_vocab, n_state), dtype=dtype)
     
     def forward(self, 
-                x: RaggedTensor, 
-                xa: Tensor, 
+                x: RaggedTensor,
                 mask: Tensor, 
                 positional_embedding: Tensor, 
                 multi_kv_cache: list = None,
+                cross_kv_cache: list = None,
                 use_cache: bool = False):
         
         if use_cache:
@@ -205,10 +209,11 @@ class WhisperDecoder(Module):
         
         for i, block in enumerate(self.blocks):
             kv_cache = multi_kv_cache[i]
-            hidden_states = block(hidden_states, 
-                                   xa, 
+            c_kv_cache = cross_kv_cache[i]
+            hidden_states = block(hidden_states,
                                    mask=mask, 
                                    multi_kv_cache=kv_cache,
+                                   cross_kv_cache=c_kv_cache,
                                    use_cache=use_cache)
             if use_cache:
                 presents.append(hidden_states[1])
@@ -271,18 +276,6 @@ class WhisperDecoder(Module):
             input_lengths,
             max_input_length
         )
-        
-        mel = Tensor(
-            name='mel',
-            dtype=trt.float16,
-            shape=[1, 1500, 1280],
-            is_network_input=True,
-            dim_range=OrderedDict([
-                ('batch_size', [1]),
-                ('position_len', [1500]),
-                ('hidden_states', [1280])
-            ])
-        )
 
         mask = Tensor(
             name='mask',
@@ -322,4 +315,121 @@ class WhisperDecoder(Module):
                     dim_range=kv_dim_range)
             past_key_value.append(kv)
         
-        return (x_ragged, mel, mask, positional_embedding, past_key_value, True)
+        cross_past_key_value = []
+        cross_kv_dim_range = OrderedDict([
+                    ('batch_size', [1]),
+                    ('kv', [2]),
+                    ('num_heads', [20]),
+                    ('past_key_len', [1500]),
+                    ('head_size', [64]),
+                ])
+        
+        for i in range(self.n_layer):
+            kv = Tensor(name=f'cross_past_key_value_'+str(i),
+                    dtype=trt.float16,
+                    shape=[1, 2, 20, 1500, 64],
+                    is_network_input=True,
+                    dim_range=cross_kv_dim_range)
+            cross_past_key_value.append(kv)
+        
+        return (x_ragged, mask, positional_embedding, past_key_value, cross_past_key_value, True)
+
+class KVLinearBlock(Module):
+    def __init__(self,
+                 n_state: int,
+                 n_head,
+                 dtype
+                 ):
+        super().__init__()
+        
+        self.k_linear = Linear(n_state,
+                                n_state,
+                                bias=False,
+                                dtype=dtype,
+                                gather_output=False)
+
+        self.v_linear = Linear(n_state,
+                                n_state,
+                                bias=True,
+                                dtype=dtype,
+                                gather_output=False)
+        self.n_head = n_head
+        self.n_state = n_state
+        self.n_head_size = n_state // n_head
+        
+    def forward(self,
+                xa: Tensor,
+                ):
+        key = self.k_linear(xa)
+        value = self.v_linear(xa)
+
+        def transpose_for_scores(x, is_kv: bool = False):
+            _num_attention_heads = self.n_head
+            new_x_shape = concat([
+                shape(x, 0),
+                shape(x, 1), _num_attention_heads, self.n_head_size
+            ])
+            return x.view(new_x_shape).permute([0, 2, 1, 3])
+
+        key = transpose_for_scores(key, is_kv=True)
+        value = transpose_for_scores(value, is_kv=True)
+        
+        key_inflated_shape = concat([
+            shape(key, 0), 1,
+            shape(key, 1),
+            shape(key, 2),
+            shape(key, 3)
+        ])
+        inflated_key = key.view(key_inflated_shape,
+                                        zero_is_placeholder=False)
+        inflated_value = value.view(key_inflated_shape,
+                                            zero_is_placeholder=False)
+        cross_past_key_value = concat([inflated_key, inflated_value], dim=1)
+
+        # if self.use_int8_kv_cache:
+
+        #     def quantize_tensor(x, scale):
+        #         scaled = x * scale
+        #         rounded = round(scaled)
+        #         clipped = clip(rounded, -128, 127)
+        #         quantized = cast(clipped, 'int8')
+        #         return quantized
+
+        #     cross_past_key_value = quantize_tensor(
+        #         cross_past_key_value, self.kv_orig_quant_scale.value)
+
+        return cross_past_key_value
+
+class CrossAttn_KV(Module):
+    def __init__(self, n_state: int, n_head: int, n_layer: int, dtype):
+        super().__init__()
+        self.blocks = ModuleList([
+            KVLinearBlock(n_state, n_head, dtype) for _ in range(n_layer)
+        ])
+        
+    def forward(self, 
+                xa: Tensor):
+        presents = []
+        for i, block in enumerate(self.blocks):
+            cross_past_key_value = block(xa)
+            presents.append(cross_past_key_value)
+            
+        for i, present in enumerate(presents):
+            present.mark_output(f'cross_present_key_value_{i}', str_dtype_to_trt("float16"))
+        return presents
+    
+    def prepare_inputs(self,):
+        xa = Tensor(
+            name='xa',
+            dtype=trt.float16,
+            shape=[1, 1500, 1280],
+            is_network_input=True,
+            dim_range=OrderedDict([
+                ('batch_size', [1]),
+                ('position_len', [1500]),
+                ('hidden_states', [1280])
+            ])
+        )
+        
+        return (xa)
+    

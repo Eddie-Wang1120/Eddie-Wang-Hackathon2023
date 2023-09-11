@@ -90,6 +90,7 @@ def main(args):
     
     whisper_decoding = WhisperDecoding(
         engine_dir / get_engine_name('whisper_decoder', dtype, world_size, runtime_rank),
+        engine_dir / get_engine_name('whsiper_crossattn', dtype, world_size, runtime_rank),
         'float16',
         True,
         'en',

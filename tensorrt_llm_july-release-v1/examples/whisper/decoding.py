@@ -296,7 +296,8 @@ class GreedyDecoder(TokenDecoder):
 class WhisperDecoding:
     def __init__(
         self, 
-        serialize_path, 
+        decoder_serialize_path, 
+        cross_kv_serialize_path,
         dtype, 
         multilingual, 
         language, 
@@ -305,7 +306,8 @@ class WhisperDecoding:
         positional_embedding
         ):
         
-        self.session = self.get_session(serialize_path)
+        self.deocder_session = self.get_session(decoder_serialize_path)
+        self.crossattn_session = self.get_session(cross_kv_serialize_path)
         self.dtype = dtype
         self.tokenizer = self.get_tokenizer(multilingual, language, task)
 
@@ -482,7 +484,35 @@ class WhisperDecoding:
 
         return tuple(tokens)
 
-    def decode(self, x, xa, past_key_value=None):
+    def xa2cross_key_value(self, xa):
+        inputs = OrderedDict()
+        output_list = []
+        inputs.update({'xa': xa.type(torch.float16).contiguous()})
+        output_list.append(TensorInfo('xa', str_dtype_to_trt("float16"), xa.shape))
+
+        output_info = self.crossattn_session.infer_shapes(output_list)
+        
+        logger.debug(f'output info {output_info}')
+        outputs = {
+                t.name: torch.empty(tuple(t.shape),
+                                dtype=trt_dtype_to_torch(t.dtype),
+                                device='cuda')
+                for t in output_info
+        }
+
+        # Execute model inference
+        stream = torch.cuda.current_stream()
+        ok = self.crossattn_session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
+        assert ok, 'Engine execution failed'
+        stream.synchronize()
+    
+        cross_past_key_value = []
+        for i in range(self.n_layer):
+            cross_past_key_value.append(outputs['cross_present_key_value_'+str(i)])
+        
+        return cross_past_key_value
+
+    def decode(self, x, cross_past_key_value, past_key_value=None):
 
         inputs = OrderedDict()
         output_list = []
@@ -497,11 +527,6 @@ class WhisperDecoding:
         inputs.update({'max_input_length':max_input_length})
         output_list.append(TensorInfo('max_input_length', str_dtype_to_trt("int32"), max_input_length.shape))
     
-        # mel = torch.tensor(np.load("decoder_0_xa.npy"), dtype=torch.float16).to("cuda")
-        # mel = torch.tensor(np.load("decoder_1_xa.npy"), dtype=torch.float16).to("cuda")
-        inputs.update({'mel': xa.type(torch.float16).contiguous()})
-        output_list.append(TensorInfo('mel', str_dtype_to_trt("float16"), xa.shape))
-
         mask = torch.empty(self.n_ctx, self.n_ctx, dtype=torch.float32).fill_(-50000).triu_(1).to("cuda")
         mask = mask[:x.shape[-1], :x.shape[-1]]
         mask = mask.contiguous()
@@ -528,7 +553,11 @@ class WhisperDecoding:
                 inputs.update({'past_key_value_'+str(i): past_key_value[i].contiguous()})
                 output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), past_key_value[i].shape))
 
-        output_info = self.session.infer_shapes(output_list)
+        for i in range(self.n_layer):
+            inputs.update({'cross_past_key_value_'+str(i): cross_past_key_value[i].contiguous()})
+            output_list.append(TensorInfo('cross_past_key_value_'+str(i), str_dtype_to_trt('float16'), cross_past_key_value[i].shape))
+
+        output_info = self.deocder_session.infer_shapes(output_list)
         
         logger.debug(f'output info {output_info}')
         outputs = {
@@ -540,7 +569,7 @@ class WhisperDecoding:
 
         # Execute model inference
         stream = torch.cuda.current_stream()
-        ok = self.session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
+        ok = self.deocder_session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
         assert ok, 'Engine execution failed'
         stream.synchronize()
     
@@ -551,26 +580,6 @@ class WhisperDecoding:
         logits = outputs['output']
         
         return logits, past_key_value
-
-        # # # collect detected languages; suppress all non-language tokens
-        # # mask = torch.ones(logits.shape[-1], dtype=torch.bool)
-        # # mask[list(tokenizer.all_language_tokens)] = False
-        # # logits[:, mask] = -np.inf
-        # # language_tokens = logits.argmax(dim=-1)
-        # # language_token_probs = logits.softmax(dim=-1).cpu()
-        # # language_probs = [
-        # #     {
-        # #         c: language_token_probs[i, j].item()
-        # #         for j, c in zip(tokenizer.all_language_tokens, tokenizer.all_language_codes)
-        # #     }
-        # #     for i in range(n_audio)
-        # # ]
-
-        # # if single:
-        # #     language_tokens = language_tokens[0]
-        # #     language_probs = language_probs[0]
-
-        # # return language_tokens, language_probs
 
     def torch_detect_language(self, model, audio_features):
         with torch.no_grad():
@@ -608,7 +617,7 @@ class WhisperDecoding:
                 if self.options.language is None:
                     self.tokens[:, self.sot_index + 1] = language_tokens  # write language tokens
 
-        return languages, language_probs
+        return languages, language_probs        
 
     def detect_language(self, audio_features):
         languages = [self.options.language] * audio_features.shape[0]
@@ -623,7 +632,8 @@ class WhisperDecoding:
             n_audio = audio_features.shape[0]
             x = torch.tensor([[self.tokenizer.sot]] * n_audio).to(audio_features.device)  # [n_audio, 1]
             
-            logits, _ = self.decode(x, audio_features)
+            cross_past_key_value = self.xa2cross_key_value(audio_features)
+            logits, _ = self.decode(x, cross_past_key_value)
             logits = logits[:, 0]
             
             mask = torch.ones(logits.shape[-1], dtype=torch.bool)
@@ -695,13 +705,15 @@ class WhisperDecoding:
         
         past_key_value = None
         
+        cross_past_key_value = self.xa2cross_key_value(audio_features)
+        
         for i in range(self.sample_len):
             past_tokens = tokens
             if tokens.shape[-1] > self.initial_token_length:
                 # only need to use the last token except in the first forward pass
                 tokens = tokens[:, -1:]
                 
-            logits, past_key_value = self.decode(tokens, audio_features, past_key_value)
+            logits, past_key_value = self.decode(tokens, cross_past_key_value, past_key_value)
             tokens = past_tokens
             
             if (

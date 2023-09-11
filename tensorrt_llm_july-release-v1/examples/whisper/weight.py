@@ -9,7 +9,7 @@ import tensorrt_llm
 from tensorrt_llm._utils import (pad_vocab_size, str_dtype_to_np,
                                  str_dtype_to_torch)
 from tensorrt_llm.functional import is_gated_activation
-from tensorrt_llm.models import WhisperEncoder, WhisperDecoder
+from tensorrt_llm.models import WhisperEncoder, WhisperDecoder, CrossAttn_KV
 from tensorrt_llm.quantization import QuantMode
 
 def trans_weight(weight):
@@ -98,11 +98,6 @@ def load_decoder_weight(tensorrt_llm_whisper: WhisperDecoder,
         tensorrt_llm_whisper.blocks[i].cross_attn.q_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.query.weight'])
         tensorrt_llm_whisper.blocks[i].cross_attn.q_linear.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.query.bias'])
 
-        tensorrt_llm_whisper.blocks[i].cross_attn.k_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'])
-
-        tensorrt_llm_whisper.blocks[i].cross_attn.v_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'])
-        tensorrt_llm_whisper.blocks[i].cross_attn.v_linear.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.bias'])
-
         tensorrt_llm_whisper.blocks[i].cross_attn.dense.weight.value = model_params['decoder.blocks.'+str(i)+'.cross_attn.out.weight'].numpy()
         tensorrt_llm_whisper.blocks[i].cross_attn.dense.bias.value = model_params['decoder.blocks.'+str(i)+'.cross_attn.out.bias'].numpy()
         tensorrt_llm_whisper.blocks[i].cross_attn.dense.matmul_trans_weight = False
@@ -121,6 +116,17 @@ def load_decoder_weight(tensorrt_llm_whisper: WhisperDecoder,
     tensorrt_llm_whisper.ln.bias.value = model_params['decoder.ln.bias'].numpy()
 
     tensorrt_llm_whisper.token_embedding_weight.value = model_params['decoder.token_embedding.weight'].numpy()
+
+def load_crossattn_linear_weight(tensorrt_llm_whisper: CrossAttn_KV,
+                model_params : dict,
+                n_layer : int):
+    tensorrt_llm.logger.info('Loading CrossAttn weights from PT...')
+    
+    for i in range(n_layer):
+        tensorrt_llm_whisper.blocks[i].k_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'])
+
+        tensorrt_llm_whisper.blocks[i].v_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'])
+        tensorrt_llm_whisper.blocks[i].v_linear.weight.bias = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.bias'])
 
 # model = torch.load("large-v2.pt")
 

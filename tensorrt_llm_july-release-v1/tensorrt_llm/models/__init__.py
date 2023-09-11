@@ -8,7 +8,7 @@ from .llama.model import LLaMAForCausalLM, LLaMAModel
 from .opt.model import OPTLMHeadModel, OPTModel
 from .quantized.quant import smooth_quantize, weight_only_quantize
 
-from .whisper.model import WhisperEncoder, WhisperDecoder
+from .whisper.model import WhisperEncoder, WhisperDecoder, CrossAttn_KV
 __all__ = [
     'BertModel',
     'BertForQuestionAnswering',
@@ -29,5 +29,6 @@ __all__ = [
     'ChatGLM6BHeadModel',
     'ChatGLM6BModel',
     'WhisperEncoder',
-    'WhisperDecoder'
+    'WhisperDecoder',
+    'CrossAttn_KV'
 ]
