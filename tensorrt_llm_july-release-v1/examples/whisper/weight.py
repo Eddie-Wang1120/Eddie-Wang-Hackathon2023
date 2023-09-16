@@ -12,13 +12,23 @@ from tensorrt_llm.functional import is_gated_activation
 from tensorrt_llm.models import WhisperEncoder, WhisperDecoder, CrossAttn_KV
 from tensorrt_llm.quantization import QuantMode
 
+def sinusoids(length, channels, max_timescale=10000):
+    """Returns sinusoids for positional embedding"""
+    assert channels % 2 == 0
+    log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
+    inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
+    scaled_time = torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
+    return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
+
 def trans_weight(weight):
     return np.ascontiguousarray(weight.numpy())
 
 def load_encoder_weight(tensorrt_llm_whisper: WhisperEncoder,
+                model_metadata : dict,
                 model_params : dict,
                 n_layer : int):
     tensorrt_llm.logger.info('Loading encoder weights from PT...')
+    tensorrt_llm_whisper.positional_embedding.value = sinusoids(model_metadata['n_audio_ctx'], model_metadata['n_audio_state']).numpy()
 
     tensorrt_llm_whisper.conv1.weight.value = torch.unsqueeze(model_params['encoder.conv1.weight'], -1).numpy()
     tensorrt_llm_whisper.conv1.bias.value = model_params['encoder.conv1.bias'].numpy()
@@ -66,6 +76,7 @@ def load_decoder_weight(tensorrt_llm_whisper: WhisperDecoder,
                 model_params : dict,
                 n_layer : int):
     tensorrt_llm.logger.info('Loading decoder weights from PT...')
+    # tensorrt_llm_whisper.positional_embedding.value = model_params['decoder.positional_embedding'].numpy()
     tensorrt_llm_whisper.token_embedding.weight.value = model_params['decoder.token_embedding.weight'].numpy()
     
     for i in range(n_layer):
@@ -130,6 +141,4 @@ def load_crossattn_linear_weight(tensorrt_llm_whisper: CrossAttn_KV,
 
 # model = torch.load("large-v2.pt")
 
-# print(model['model_state_dict'].keys())
 # print(model['dims'])
-# print(model['model_state_dict']['decoder.token_embedding.weight'].shape)

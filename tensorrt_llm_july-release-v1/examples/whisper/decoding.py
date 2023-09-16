@@ -7,11 +7,17 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 from collections import OrderedDict
+from pathlib import Path
 import zlib
+import json
 
 from tokenizer import Tokenizer, LANGUAGES, TO_LANGUAGE_CODE
+from build import get_engine_name
 
+import tensorrt_llm
+from tensorrt_llm.runtime import ModelConfig, SamplingConfig
 from tensorrt_llm.runtime.session import Session, TensorInfo
+from tensorrt_llm.runtime import ModelConfig, SamplingConfig
 import tensorrt_llm.logger as logger
 from tensorrt_llm._utils import (str_dtype_to_torch, str_dtype_to_trt,
                                  trt_dtype_to_torch)
@@ -296,36 +302,38 @@ class GreedyDecoder(TokenDecoder):
 class WhisperDecoding:
     def __init__(
         self, 
-        decoder_serialize_path, 
-        cross_kv_serialize_path,
-        dtype, 
-        multilingual, 
-        language, 
-        task,
-        model_metadata,
-        positional_embedding
+        # decoder_serialize_path, 
+        # cross_kv_serialize_path,
+        # dtype, 
+        # multilingual, 
+        # language, 
+        # task,
+        # model_metadata,
+        # positional_embedding
+        engine_dir
         ):
         
-        self.deocder_session = self.get_session(decoder_serialize_path)
-        self.crossattn_session = self.get_session(cross_kv_serialize_path)
-        self.dtype = dtype
-        self.tokenizer = self.get_tokenizer(multilingual, language, task)
+        self.decoder_config = None
+        self.cross_attn_config = None
+        self.decoder_session, self.cross_attn_session = self.get_session(engine_dir)
+        self.tokenizer = self.get_tokenizer(True, 'en', 'transcribe')
 
         self.sot_sequence = self.tokenizer.sot_sequence
         self.initial_tokens = tuple(list(self.sot_sequence))
         self.initial_token_length = len(self.initial_tokens)
-        self.tokens = torch.tensor([self.initial_tokens]).repeat(model_metadata['n_audio'], 1)
+        self.tokens = torch.tensor([self.initial_tokens]).repeat(self.decoder_config['num_audio'], 1)
         self.sot_index = self.initial_tokens.index(self.tokenizer.sot)
         self.options = DecodingOptions()
         
-        self.n_audio = model_metadata['n_audio']
-        self.n_layer = model_metadata['n_text_layer']
-        self.n_ctx = model_metadata['n_text_ctx']
+        # self.n_audio = model_metadata['n_audio']
+        # self.n_layer = model_metadata['n_text_layer']
+        # self.n_ctx = model_metadata['n_text_ctx']
         self.n_group = self.options.beam_size or self.options.best_of or 1
-        self.sample_len: int = self.options.sample_len or model_metadata['n_text_ctx'] // 2
+        self.sample_len: int = self.options.sample_len or self.decoder_config['num_text_ctx'] // 2
         self.sample_begin: int = len(self.initial_tokens)
         
-        self.positional_embedding = positional_embedding
+        # self.positional_embedding = positional_embedding
+        self.positional_embedding = torch.tensor(np.load(engine_dir / 'positional_embedding.npy')).to('cuda')
 
         self.logit_filters = []
         if self.options.suppress_blank:
@@ -333,7 +341,7 @@ class WhisperDecoding:
         if self.options.suppress_tokens:
             self.logit_filters.append(SuppressTokens(self._get_suppress_tokens()))
         if not self.options.without_timestamps:
-            precision = CHUNK_LENGTH / model_metadata['n_audio_ctx']  # usually 0.02 seconds
+            precision = CHUNK_LENGTH / self.decoder_config['num_audio_ctx']  # usually 0.02 seconds
             max_initial_timestamp_index = None
             if self.options.max_initial_timestamp:
                 max_initial_timestamp_index = round(
@@ -356,7 +364,40 @@ class WhisperDecoding:
         
         self.kv_cache = {}
         self.hooks = []
-
+        
+    def get_session(self, engine_dir):
+        # decoder
+        config_path = engine_dir / 'decoder_config.json'
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        decoder_config = OrderedDict()
+        decoder_config.update(config['plugin_config'])
+        decoder_config.update(config['builder_config'])
+        self.decoder_config = decoder_config
+        
+        serialize_path = engine_dir / get_engine_name('whisper_decoder', decoder_config['precision'], decoder_config['tensor_parallel'], 0)
+        
+        with open(serialize_path, 'rb') as f:
+            decoder_session = Session.from_serialized_engine(f.read())
+            
+        # cross_attn
+        config_path = engine_dir / 'cross_attn_config.json'
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        cross_attn_config = OrderedDict()
+        cross_attn_config.update(config['plugin_config'])
+        cross_attn_config.update(config['builder_config'])
+        self.cross_attn_config = cross_attn_config
+        
+        serialize_path = engine_dir / get_engine_name('whsiper_crossattn', cross_attn_config['precision'], cross_attn_config['tensor_parallel'], 0)
+        
+        with open(serialize_path, 'rb') as f:
+            cross_attn_session = Session.from_serialized_engine(f.read())
+        
+        return decoder_session, cross_attn_session
+            
     def _get_suppress_tokens(self) -> Tuple[int]:
         suppress_tokens = self.options.suppress_tokens
 
@@ -448,12 +489,6 @@ class WhisperDecoding:
 
         return Tokenizer(encoding=encoding, language=language, task=task)
 
-    def get_session(self, serialize_path):
-        with open(serialize_path, 'rb') as f:
-            session = Session.from_serialized_engine(f.read())
-        # print(session._print_io_info())
-        return session 
-
     def _get_initial_tokens(self) -> Tuple[int]:
         tokens = list(self.sot_sequence)
 
@@ -465,7 +500,7 @@ class WhisperDecoding:
                 else prefix
             )
             if self.sample_len is not None:
-                max_prefix_len = self.n_ctx // 2 - self.sample_len
+                max_prefix_len = self.decoder_config['num_text_ctx'] // 2 - self.sample_len
                 prefix_tokens = prefix_tokens[-max_prefix_len:]
             tokens = tokens + prefix_tokens
 
@@ -478,7 +513,7 @@ class WhisperDecoding:
             )
             tokens = (
                 [self.tokenizer.sot_prev]
-                + prompt_tokens[-(self.n_ctx // 2 - 1) :]
+                + prompt_tokens[-(self.decoder_config['num_text_ctx'] // 2 - 1) :]
                 + tokens
             )
 
@@ -490,7 +525,7 @@ class WhisperDecoding:
         inputs.update({'xa': xa.type(torch.float16).contiguous()})
         output_list.append(TensorInfo('xa', str_dtype_to_trt("float16"), xa.shape))
 
-        output_info = self.crossattn_session.infer_shapes(output_list)
+        output_info = self.cross_attn_session.infer_shapes(output_list)
         
         logger.debug(f'output info {output_info}')
         outputs = {
@@ -502,62 +537,98 @@ class WhisperDecoding:
 
         # Execute model inference
         stream = torch.cuda.current_stream()
-        ok = self.crossattn_session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
+        ok = self.cross_attn_session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
         assert ok, 'Engine execution failed'
         stream.synchronize()
     
         cross_past_key_value = []
-        for i in range(self.n_layer):
+        for i in range(self.cross_attn_config['num_layers']):
             cross_past_key_value.append(outputs['cross_present_key_value_'+str(i)])
         
         return cross_past_key_value
 
     def decode(self, x, cross_past_key_value, past_key_value=None):
 
+        batch_size = x.shape[0]
+        use_gpt_attention_plugin = self.decoder_config['gpt_attention_plugin']
+
         inputs = OrderedDict()
         output_list = []
         inputs.update({'x' : x.type(torch.int32).contiguous()})
         output_list.append(TensorInfo('x', str_dtype_to_trt("int32"), x.shape))
     
-        input_lengths = torch.tensor((1,), dtype=torch.int32, device='cuda')
+        input_len = x.shape[-1]
+
+        input_lengths = torch.tensor((input_len,), dtype=torch.int32, device='cuda')
         inputs.update({'input_lengths':input_lengths})
         output_list.append(TensorInfo('input_lengths', str_dtype_to_trt("int32"), input_lengths.shape))
-    
-        max_input_length = torch.tensor((1,), dtype=torch.int32, device='cuda')
+        
+        max_input_length = torch.tensor((input_len,), dtype=torch.int32, device='cuda')
         inputs.update({'max_input_length':max_input_length})
         output_list.append(TensorInfo('max_input_length', str_dtype_to_trt("int32"), max_input_length.shape))
     
-        mask = torch.empty(self.n_ctx, self.n_ctx, dtype=torch.float32).fill_(-50000).triu_(1).to("cuda")
-        mask = mask[:x.shape[-1], :x.shape[-1]]
-        mask = mask.contiguous()
-        inputs.update({'mask':mask})
-        output_list.append(TensorInfo('mask', str_dtype_to_trt("float32"), mask.shape))
+        if not use_gpt_attention_plugin:
+            mask = torch.empty(self.decoder_config['num_text_ctx'], self.decoder_config['num_text_ctx'], dtype=torch.float32).fill_(-50000).triu_(1).to("cuda")
+            mask = mask[:x.shape[-1], :x.shape[-1]]
+            mask = mask.contiguous()
+            inputs.update({'mask':mask})
+            output_list.append(TensorInfo('mask', str_dtype_to_trt("float32"), mask.shape))
+        else:
+            masked_tokens = torch.zeros((1, input_len),
+                                    dtype=torch.int32,
+                                    device='cuda')
+            inputs.update({'masked_tokens':masked_tokens.type(torch.int32).contiguous()})
+            output_list.append(TensorInfo('masked_tokens', str_dtype_to_trt("int32"), masked_tokens.shape))
+        
+            cache_indirection = torch.full((batch_size, 1, input_len), 0, dtype=torch.int32, device='cuda')
+            inputs.update({'cache_indirection':cache_indirection.type(torch.int32).contiguous()})
+            output_list.append(TensorInfo('cache_indirection', str_dtype_to_trt("int32"), cache_indirection.shape))
     
-        positional_embedding = self.positional_embedding.to("cuda")
+            past_key_value_length = torch.tensor([0, 1], dtype=torch.int32).to('cuda')
+            inputs.update({'past_key_value_length':past_key_value_length.type(torch.int32).contiguous()})
+            output_list.append(TensorInfo('past_key_value_length', str_dtype_to_trt("int32"), past_key_value_length.shape))
+    
+            sequence_length = torch.tensor((input_len,), dtype=torch.int32, device='cuda')
+            inputs.update({'sequence_length':sequence_length})
+            output_list.append(TensorInfo('sequence_length', str_dtype_to_trt("int32"), sequence_length.shape))
+    
+        # len_list = torch.arange(0,
+        #                         max_len,
+        #                         dtype=torch.int32,
+        #                         device='cuda').unsqueeze(0).expand(
+        #                             1, -1)
+        # mask = (len_list >= input_lengths.unsqueeze(1)) & (len_list <
+        #                                                    max_input_length)
+        # masked_tokens = torch.zeros((1, max_len),
+        #                             dtype=torch.int32,
+        #                             device='cuda').masked_fill_(mask, 1)
+        # masked_tokens = torch.zeros((1, input_len),
+        #                             dtype=torch.int32,
+        #                             device='cuda')
+        # inputs.update({'masked_tokens':masked_tokens.type(torch.int32).contiguous()})
+        # output_list.append(TensorInfo('masked_tokens', str_dtype_to_trt("int32"), masked_tokens.shape))
+    
+        positional_embedding = self.positional_embedding
         offset = past_key_value[0].shape[3] if past_key_value else 0
-
         positional_embedding = positional_embedding[offset : offset + x.shape[-1]]
         inputs.update({'positional_embedding':positional_embedding.type(torch.float16).contiguous()})
         output_list.append(TensorInfo('positional_embedding', str_dtype_to_trt("float16"), positional_embedding.shape))
-    
+
         if past_key_value is None:
-            past_key_value = []
-            for i in range(self.n_layer):
-                past_key_value.append(
-                    torch.ones((1,), dtype=torch.float16).to('cuda')
-                )
-                inputs.update({'past_key_value_'+str(i): past_key_value[i].contiguous()})
-                output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), (1, 2, 20, 0, 64)))
+            for i in range(self.decoder_config['num_layers']):
+                past_key_value = torch.tensor((1,), dtype=torch.float16).to('cuda')
+                inputs.update({'past_key_value_'+str(i): past_key_value.contiguous()})
+                output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), torch.Size((1, 2, 20, 0, 64))))
         else:
-            for i in range(self.n_layer):
+            for i in range(self.decoder_config['num_layers']):
                 inputs.update({'past_key_value_'+str(i): past_key_value[i].contiguous()})
                 output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), past_key_value[i].shape))
 
-        for i in range(self.n_layer):
+        for i in range(self.decoder_config['num_layers']):
             inputs.update({'cross_past_key_value_'+str(i): cross_past_key_value[i].contiguous()})
             output_list.append(TensorInfo('cross_past_key_value_'+str(i), str_dtype_to_trt('float16'), cross_past_key_value[i].shape))
 
-        output_info = self.deocder_session.infer_shapes(output_list)
+        output_info = self.decoder_session.infer_shapes(output_list)
         
         logger.debug(f'output info {output_info}')
         outputs = {
@@ -569,15 +640,17 @@ class WhisperDecoding:
 
         # Execute model inference
         stream = torch.cuda.current_stream()
-        ok = self.deocder_session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
+        
+        ok = self.decoder_session.run(inputs=inputs, outputs=outputs, stream=stream.cuda_stream)
         assert ok, 'Engine execution failed'
         stream.synchronize()
     
         past_key_value = []
-        for i in range(self.n_layer):
+        for i in range(self.decoder_config['num_layers']):
             past_key_value.append(outputs['present_key_value_'+str(i)])
         
         logits = outputs['output']
+    
         
         return logits, past_key_value
 
@@ -638,6 +711,7 @@ class WhisperDecoding:
             
             cross_past_key_value = self.xa2cross_key_value(audio_features)
             logits, _ = self.decode(x, cross_past_key_value)
+            
             logits = logits[:, 0]
             
             mask = torch.ones(logits.shape[-1], dtype=torch.bool)
@@ -696,7 +770,7 @@ class WhisperDecoding:
             
                 tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
             
-                if completed or tokens.shape[-1] > self.n_ctx:
+                if completed or tokens.shape[-1] > self.decoder_config['num_text_ctx']:
                     break
         for hook in self.hooks:
             hook.remove()
@@ -719,7 +793,6 @@ class WhisperDecoding:
             if tokens.shape[-1] > self.initial_token_length:
                 # only need to use the last token except in the first forward pass
                 tokens = tokens[:, -1:]
-                
             logits, past_key_value = self.decode(tokens, cross_past_key_value, past_key_value)
             tokens = past_tokens
             
@@ -738,7 +811,7 @@ class WhisperDecoding:
             
             tokens, completed = self.decoder.update(tokens, logits, sum_logprobs)
             
-            if completed or tokens.shape[-1] > self.n_ctx:
+            if completed or tokens.shape[-1] > self.decoder_config['num_text_ctx']:
                 break
             
         return tokens, sum_logprobs, no_speech_probs
@@ -751,10 +824,10 @@ class WhisperDecoding:
         # reshape the tensors to have (n_audio, n_group) as the first two dimensions
         audio_features = audio_features[:: self.n_group]
         no_speech_probs = no_speech_probs[:: self.n_group]
-        assert audio_features.shape[0] == len(no_speech_probs) == self.n_audio
+        assert audio_features.shape[0] == len(no_speech_probs) == self.decoder_config['num_audio']
 
-        tokens = tokens.reshape(self.n_audio, self.n_group, -1)
-        sum_logprobs = sum_logprobs.reshape(self.n_audio, self.n_group)
+        tokens = tokens.reshape(self.decoder_config['num_audio'], self.n_group, -1)
+        sum_logprobs = sum_logprobs.reshape(self.decoder_config['num_audio'], self.n_group)
 
         # get the final candidates for each group, and slice between the first sampled token and EOT
         tokens, sum_logprobs = self.decoder.finalize(tokens, sum_logprobs)

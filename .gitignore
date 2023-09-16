@@ -5,3 +5,5 @@ tensorrt_llm.egg-info
 *.engine
 *.pt
 LibriSpeech
+no_plugin
+whisper_outputs

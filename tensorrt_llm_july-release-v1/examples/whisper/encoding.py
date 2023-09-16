@@ -5,21 +5,37 @@ from tensorrt_llm.runtime.session import Session, TensorInfo
 import tensorrt_llm.logger as logger
 from tensorrt_llm._utils import (str_dtype_to_torch, str_dtype_to_trt,
                                  trt_dtype_to_torch)
+from build import get_engine_name
+import json
 
 class WhisperEncoding:
     def __init__(
         self, 
-        serialize_path, 
-        dtype
+        engine_dir,
         ):
         
-        self.session = self.get_session(serialize_path)
-        self.dtype = dtype
+        self.session = self.get_session(engine_dir)
+        self.dtype = 'float16'
 
-    def get_session(self, serialize_path):
+    def get_session(self, engine_dir):
+        config_path = engine_dir / 'encoder_config.json'
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        use_gpt_attention_plugin = config['plugin_config']['gpt_attention_plugin']
+        dtype = config['builder_config']['precision']
+        world_size = config['builder_config']['tensor_parallel']
+        num_heads = config['builder_config']['num_heads'] // world_size
+        hidden_size = config['builder_config']['hidden_size'] // world_size
+        num_layers = config['builder_config']['num_layers']
+        
+        self.dtype = dtype
+        
+        serialize_path = engine_dir / get_engine_name('whisper_encoder', self.dtype, world_size, 0)
+        
         with open(serialize_path, 'rb') as f:
             session = Session.from_serialized_engine(f.read())
-        # print(session._print_io_info())
+        
         return session 
     
     def torch_get_audio_features(self, model, mel):

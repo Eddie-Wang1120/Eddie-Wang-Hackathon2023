@@ -7,27 +7,33 @@ from ...functional import clip, concat, view, shape, permute, cast, matmul, gelu
 from ...layers import Linear, Conv2d, Conv1d, LayerNorm, Attention, Gelu, Embedding
 from ...module import Module, ModuleList
 from ...parameter import Parameter
+from ...layers.attention import AttentionMaskType
 
 import tensorrt as trt
 from collections import OrderedDict
+
+import torch
 
 class ResidualAttentionBlock(Module):
     def __init__(self,
                  n_state: int,
                  n_head : int,
                  n_ctx : int,
-                 cross_attention: bool = False
+                 dtype,
+                 cross_attention: bool = False,
+                 mask_type: AttentionMaskType = AttentionMaskType.padding
+                 
                  ):
         super().__init__()
-        self.attn_ln = LayerNorm(n_state, dtype=str_dtype_to_trt("float16"))
+        self.attn_ln = LayerNorm(n_state, dtype=dtype)
 
         self.attn = Attention(
             n_state,
             n_head,
             n_ctx,
             bias=True,
-            dtype=str_dtype_to_trt("float16"),
-            
+            dtype=dtype,
+            attention_mask_type=mask_type
         )
 
         self.cross_attn = (
@@ -37,7 +43,8 @@ class ResidualAttentionBlock(Module):
                 n_ctx,
                 cross_attention=True,
                 bias=True,
-                dtype=str_dtype_to_trt("float16")
+                dtype=dtype,
+                # attention_mask_type=AttentionMaskType.causal
             ) if cross_attention else None
         )
         self.cross_attn_ln = LayerNorm(n_state) if cross_attention else None
@@ -45,12 +52,16 @@ class ResidualAttentionBlock(Module):
         n_mlp = n_state*4
         self.mlp_ln = LayerNorm(n_state)
 
-        self.mlp1 = Linear(n_state, n_mlp, bias=True, dtype=str_dtype_to_trt("float16"))
-        self.mlp2 = Linear(n_mlp, n_state, bias=True, dtype=str_dtype_to_trt("float16"))
+        self.mlp1 = Linear(n_state, n_mlp, bias=True, dtype=dtype)
+        self.mlp2 = Linear(n_mlp, n_state, bias=True, dtype=dtype)
     
     def forward(self,
                 x: RaggedTensor,
                 mask: Optional[Tensor] = None,
+                sequence_length: Optional[Tensor] = None,
+                past_key_value_length: Optional[Tensor] = None,
+                masked_tokens: Optional[Tensor] = None,
+                cache_indirection: Optional[Tensor] = None,
                 multi_kv_cache: Optional[Tensor] = None,
                 cross_kv_cache: Optional[Tensor] = None,
                 use_cache: Optional[bool] = False
@@ -76,6 +87,10 @@ class ResidualAttentionBlock(Module):
         attention_output = self.attn(hidden_states, 
                        attention_mask=mask,
                        past_key_value=multi_kv_cache,
+                       sequence_length=sequence_length,
+                       past_key_value_length=past_key_value_length,
+                       masked_tokens=masked_tokens,
+                       cache_indirection=cache_indirection,
                        use_cache=use_cache
                        )
 
@@ -124,23 +139,26 @@ class WhisperEncoder(Module):
                  n_state: int, 
                  n_head: int, 
                  n_layer: int,
-                 positional_embedding,
+                 dtype,
+                 mask_type = AttentionMaskType.padding
                  ):
         super().__init__()
         self.conv1 = Conv1d(n_mels, n_state, kernel_size=3, padding=1)
         self.conv2 = Conv1d(n_state, n_state, kernel_size=3, stride=2, padding=1)
         self.gelu = gelu
         self.permute = transpose
-        self.positional_embedding = positional_embedding
+        self.positional_embedding = Parameter(shape=(n_ctx, n_state), dtype=dtype)
 
         self.blocks = ModuleList([
-            ResidualAttentionBlock(n_state, n_head, n_ctx) for _ in range(n_layer)
+            ResidualAttentionBlock(n_state, n_head, n_ctx, dtype, mask_type=mask_type) for _ in range(n_layer)
         ])
     
         self.ln_post = LayerNorm(n_state)
+        
+        self.dtype = dtype
     
     def forward(self, x: RaggedTensor):
-        positional_embedding_buffer = constant(self.positional_embedding)
+        # positional_embedding_buffer = constant(self.positional_embedding)
         row_length = x.row_lengths
         max_row_length = x.max_row_length
         x = x.data
@@ -149,7 +167,7 @@ class WhisperEncoder(Module):
         x = self.conv2(x)
         x = self.gelu(x) # minor miss
         x = self.permute(x, 2, 1)
-        x = x + positional_embedding_buffer
+        x = x + self.positional_embedding.value
         
         hidden_states = RaggedTensor.from_row_lengths(
             x,
@@ -161,19 +179,58 @@ class WhisperEncoder(Module):
             hidden_states = block(hidden_states)
         x = hidden_states.data
         x = self.ln_post(x)
-        x.mark_output('output', str_dtype_to_trt("float16"))
+        x.mark_output('output', self.dtype)
         return x
     
+    def prepare_inputs(self,):
+        x = Tensor(
+            name='x',
+            dtype=trt.float16,
+            shape=[1, 80, 3000],
+            is_network_input=True
+        )
+
+        input_lengths = Tensor(name='input_lengths',
+                               dtype=trt.int32,
+                               shape=[1])
+
+        max_input_length = Tensor(name='max_input_length',
+                                  dtype=trt.int32,
+                                  shape=[1])
+
+        x_ragged = RaggedTensor.from_row_lengths(
+            x,
+            input_lengths,
+            max_input_length
+        )
+
+        
+        return (x_ragged)
+    
+    
 class WhisperDecoder(Module):
-    def __init__(self, n_vocab: int, n_ctx: int, n_state: int, n_head: int, n_layer: int, dtype):
+    def __init__(self, 
+                 n_vocab: int, 
+                 n_ctx: int, 
+                 n_state: int,
+                 n_head: int, 
+                 n_layer: int, 
+                 dtype,
+                 mask_type = AttentionMaskType.causal):
         super().__init__()
         
         self.token_embedding = Embedding(n_vocab, n_state, dtype=dtype)
         # self.positional_embedding = Parameter(shape=(n_ctx, n_state), dtype=dtype)
         self.n_state = n_state
         self.n_layer = n_layer
+        self.dtype = dtype
         self.blocks = ModuleList([
-            ResidualAttentionBlock(n_state, n_head, n_ctx, cross_attention=True) for _ in range(n_layer)
+            ResidualAttentionBlock(n_state, 
+                                   n_head, 
+                                   n_ctx, 
+                                   dtype=dtype,
+                                   cross_attention=True,
+                                   mask_type=mask_type) for _ in range(n_layer)
         ])
         
         # self.block = ResidualAttentionBlock(n_state, n_head, cross_attention=True)
@@ -184,8 +241,12 @@ class WhisperDecoder(Module):
     
     def forward(self, 
                 x: RaggedTensor,
-                mask: Tensor, 
-                positional_embedding: Tensor, 
+                positional_embedding: Tensor,
+                mask: Tensor=None, 
+                sequence_length=None,
+                past_key_value_length=None,
+                masked_tokens=None,
+                cache_indirection=None,
                 multi_kv_cache: list = None,
                 cross_kv_cache: list = None,
                 use_cache: bool = False):
@@ -212,6 +273,10 @@ class WhisperDecoder(Module):
             c_kv_cache = cross_kv_cache[i]
             hidden_states = block(hidden_states,
                                    mask=mask, 
+                                   sequence_length=sequence_length,
+                                   past_key_value_length=past_key_value_length,
+                                   masked_tokens=masked_tokens,
+                                   cache_indirection=cache_indirection,
                                    multi_kv_cache=kv_cache,
                                    cross_kv_cache=c_kv_cache,
                                    use_cache=use_cache)
@@ -225,27 +290,43 @@ class WhisperDecoder(Module):
         # self.register_network_output("x_ln", x)
         x = matmul(x, self.token_embedding_weight.value, transb=True)
 
-        x.mark_output('output', str_dtype_to_trt("float16"))
+        x.mark_output('output', self.dtype)
         
         if use_cache:
             for i, present in enumerate(presents):
-                present.mark_output(f'present_key_value_{i}', str_dtype_to_trt("float16"))
+                present.mark_output(f'present_key_value_{i}', self.dtype)
             return (x, presents)
         
         return x
     
-    def prepare_inputs(self, max_batch_size, max_input_len, max_new_tokens,
-                       use_cache, max_beam_width):
+    def prepare_inputs(self, 
+        max_batch_size, 
+        max_input_len,
+        max_new_tokens,
+        max_beam_width,
+        use_gpt_attention = False
+        ):
         
         max_output_len = max_new_tokens
         
         max_len = max_input_len + max_output_len
         
-        bb_range = [1, (max_batch_size * max_beam_width + 1) // 2, max_batch_size * max_beam_width]
+        bb_range = [1, 1, max_batch_size * max_beam_width]
         mask_len_range = [1, 1, max_len + 1]
         inlen_range = [1, 1, max_input_len]
         max_len_range = [0, (max_len + 1) // 2 + 1, max_len + 1]
-        
+        beam_width_range = [1, (max_beam_width + 1) // 2, max_beam_width]
+
+        x_ragged = None
+        mask = None 
+        positional_embedding = None 
+        sequence_length = None
+        past_key_value_length = None 
+        masked_tokens = None
+        cache_indirection = None
+        past_key_value =  None
+        cross_past_key_value = None
+
         x = Tensor(
             name='x',
             dtype=trt.int32,
@@ -259,9 +340,9 @@ class WhisperDecoder(Module):
 
         input_lengths = Tensor(name='input_lengths',
                                dtype=trt.int32,
-                               shape=[1],
+                               shape=[-1],
                                dim_range=OrderedDict([
-                                   ('batch_size', [1])
+                                   ('batch_size', [bb_range])
                                ]))
 
         max_input_length = Tensor(name='max_input_length',
@@ -277,16 +358,6 @@ class WhisperDecoder(Module):
             max_input_length
         )
 
-        mask = Tensor(
-            name='mask',
-            dtype=trt.float32,
-            shape=[-1, -1],
-            is_network_input=True,
-            dim_range=OrderedDict([
-                ('batch_size', [bb_range]),
-                ('mask_len', [mask_len_range]),
-            ]))
-        
         positional_embedding = Tensor(
             name='positional_embedding',
             dtype=trt.float16,
@@ -314,6 +385,59 @@ class WhisperDecoder(Module):
                     is_network_input=True,
                     dim_range=kv_dim_range)
             past_key_value.append(kv)
+            
+        if not use_gpt_attention:
+            mask = Tensor(
+                name='mask',
+                dtype=trt.float32,
+                shape=[-1, -1],
+                is_network_input=True,
+                dim_range=OrderedDict([
+                    ('batch_size', [mask_len_range]),
+                    ('mask_len', [mask_len_range]),
+                ]))
+        else:  
+            cache_indirection = Tensor(
+                name='cache_indirection',
+                dtype=trt.int32,
+                shape=[-1, -1, -1],
+                is_network_input=True,
+                dim_range=OrderedDict([
+                    ('batch_size', [bb_range]),
+                    ('beam_width', [beam_width_range]),
+                    ('max_seq_len', [max_len_range]),
+                ])
+            )
+            sequence_length = Tensor(
+                name='sequence_length',
+                dtype=trt.int32,
+                shape=[-1],
+                is_network_input=True,
+                dim_range=OrderedDict([
+                    ('batch_size', [bb_range]),
+                ])
+            )
+
+            past_key_value_length = Tensor(
+                name='past_key_value_length',
+                dtype=trt.int32,
+                shape=[-1],
+                is_network_input=True,
+                dim_range=OrderedDict([
+                    ('past_key_value_length', [max_len_range]),
+                ])
+            )
+
+            masked_tokens = Tensor(
+                name='masked_tokens',
+                dtype=trt.int32,
+                shape=[-1, -1],
+                is_network_input=True,
+                dim_range=OrderedDict([
+                    ('batch_size', [bb_range]),
+                    ('max_len', [max_len_range])
+                ])
+            )
         
         cross_past_key_value = []
         cross_kv_dim_range = OrderedDict([
@@ -332,7 +456,16 @@ class WhisperDecoder(Module):
                     dim_range=cross_kv_dim_range)
             cross_past_key_value.append(kv)
         
-        return (x_ragged, mask, positional_embedding, past_key_value, cross_past_key_value, True)
+        return (x_ragged, 
+                positional_embedding, 
+                mask,
+                sequence_length, 
+                past_key_value_length, 
+                masked_tokens, 
+                cache_indirection, 
+                past_key_value, 
+                cross_past_key_value, 
+                True)
 
 class KVLinearBlock(Module):
     def __init__(self,
@@ -406,6 +539,7 @@ class CrossAttn_KV(Module):
         self.blocks = ModuleList([
             KVLinearBlock(n_state, n_head, dtype) for _ in range(n_layer)
         ])
+        self.dtype = dtype
         
     def forward(self, 
                 xa: Tensor):
@@ -415,7 +549,7 @@ class CrossAttn_KV(Module):
             presents.append(cross_past_key_value)
             
         for i, present in enumerate(presents):
-            present.mark_output(f'cross_present_key_value_{i}', str_dtype_to_trt("float16"))
+            present.mark_output(f'cross_present_key_value_{i}', self.dtype)
         return presents
     
     def prepare_inputs(self,):

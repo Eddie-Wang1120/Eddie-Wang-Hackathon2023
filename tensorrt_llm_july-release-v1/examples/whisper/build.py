@@ -1,5 +1,6 @@
 import os
 import time
+import argparse
 
 import tensorrt as trt
 
@@ -35,67 +36,115 @@ def serialize_engine(engine, path):
     t = time.strftime('%H:%M:%S', time.gmtime(tok - tik))
     logger.info(f'Engine serialized. Total time: {t}')
 
-def sinusoids(length, channels, max_timescale=10000):
-    """Returns sinusoids for positional embedding"""
-    assert channels % 2 == 0
-    log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
-    inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
-    scaled_time = torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
-    return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
+def parse_arguments(args):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--world_size',
+                        type=int,
+                        default=1,
+                        help='world size, only support tensor parallelism now')
+    parser.add_argument('--model_dir', type=str, default="large-v2.pt")
+    parser.add_argument('--dtype',
+                        type=str,
+                        default='float16',
+                        choices=['float16', 'float32', 'bfloat16'])
+    parser.add_argument('--log_level', type=str, default='info')
+    parser.add_argument('--max_batch_size', type=int, default=1)
+    parser.add_argument('--max_input_len', type=int, default=200)
+    parser.add_argument('--max_output_len', type=int, default=200)
+    parser.add_argument('--max_beam_width', type=int, default=1)
+    parser.add_argument(
+        '--use_gpt_attention_plugin',
+        nargs='?',
+        const=None,
+        type=str,
+        default=False,
+        choices=['float16'],
+        help=
+        "Activates attention plugin. You can specify the plugin dtype or leave blank to use the model dtype."
+    )
+    parser.add_argument(
+        '--use_gemm_plugin',
+        nargs='?',
+        const=None,
+        type=str,
+        default=False,
+        choices=['float16', 'float32', 'bfloat16'],
+        help=
+        "Activates GEMM plugin. You can specify the plugin dtype or leave blank to use the model dtype."
+    )
+    parser.add_argument(
+        '--use_layernorm_plugin',
+        nargs='?',
+        const=None,
+        type=str,
+        default=False,
+        choices=['float16', 'float32', 'bfloat16'],
+        help=
+        "Activates layernorm plugin. You can specify the plugin dtype or leave blank to use the model dtype."
+    )
+    parser.add_argument(
+        '--output_dir',
+        type=str,
+        default='whisper_outputs',
+        help=
+        'The path to save the serialized engine files, timing cache file and model configs'
+    )
 
-def build_encoder(model):
+    args = parser.parse_args(args)
+    logger.set_level(args.log_level)
+
+    plugins_args = [
+        'use_gemm_plugin', 'use_layernorm_plugin', 'use_gpt_attention_plugin'
+    ]
+    for plugin_arg in plugins_args:
+        if getattr(args, plugin_arg) is None:
+            logger.info(
+                f"plugin_arg is None, setting it as {args.dtype} automatically."
+            )
+            setattr(args, plugin_arg, args.dtype)
+
+    return args
+
+def build_encoder(model, args):
     model_metadata = model['dims']
     model_params = model['model_state_dict']
 
-    # debug
-    logger.set_level('verbose')
-
     builder = Builder()
+
+    max_batch_size = args.max_batch_size
+    hidden_states = model_metadata['n_audio_state']
+    num_heads = model_metadata['n_audio_head']
+    num_layers = model_metadata['n_audio_layer']
 
     builder_config = builder.create_builder_config(
         name = MODEL_ENCODER_NAME,
-        precision = 'float16'
+        precision = 'float16',
+        tensor_parallel=1,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        hidden_size=hidden_states,
+        max_batch_size=max_batch_size,
     )
-
+    
     tensorrt_llm_whisper_encoder = tensorrt_llm.models.WhisperEncoder(
         model_metadata['n_mels'],
         model_metadata['n_audio_ctx'],
         model_metadata['n_audio_state'],
         model_metadata['n_audio_head'],
         model_metadata['n_audio_layer'],
-        sinusoids(model_metadata['n_audio_ctx'], model_metadata['n_audio_state']).numpy()
+        str_dtype_to_trt("float16")
     )
 
-    load_encoder_weight(tensorrt_llm_whisper_encoder, model_params, model_metadata['n_audio_layer'])
+    load_encoder_weight(tensorrt_llm_whisper_encoder, model_metadata, model_params, model_metadata['n_audio_layer'])
     
     network = builder.create_network()
     
     with net_guard(network):
-        # print(tensorrt_llm_whisper.named_parameters())
-        # network.set_named_parameters(tensorrt_llm_whisper.named_parameters())
-        x = Tensor(
-            name='x',
-            dtype=trt.float16,
-            shape=[1, 80, 3000],
-            is_network_input=True
-        )
 
-        input_lengths = Tensor(name='input_lengths',
-                               dtype=trt.int32,
-                               shape=[1])
-
-        max_input_length = Tensor(name='max_input_length',
-                                  dtype=trt.int32,
-                                  shape=[1])
-
-        x_ragged = RaggedTensor.from_row_lengths(
-            x,
-            input_lengths,
-            max_input_length
-        )
-
-        tensorrt_llm_whisper_encoder(x_ragged)
-    
+        inputs = tensorrt_llm_whisper_encoder.prepare_inputs()
+        
+        tensorrt_llm_whisper_encoder(inputs)
+        
         for k, v in tensorrt_llm_whisper_encoder.named_network_outputs():
             network._mark_output(v, k,
                              str_dtype_to_trt('float16'))
@@ -103,25 +152,49 @@ def build_encoder(model):
     engine = None
     engine_name = get_engine_name(MODEL_ENCODER_NAME, 'float16', 1, 0)
 
+    if args.use_gemm_plugin:
+        network.plugin_config.set_gemm_plugin(dtype=args.use_gemm_plugin)
+    if args.use_layernorm_plugin:
+        network.plugin_config.set_layernorm_plugin(
+            dtype=args.use_layernorm_plugin)
+
     engine = builder.build_engine(network, builder_config)
 
-    config_path = os.path.join('./', 'config.json')
+    config_path = os.path.join(args.output_dir, 'encoder_config.json')
     builder.save_config(builder_config, config_path)
 
-    serialize_engine(engine, os.path.join('./', engine_name))
+    serialize_engine(engine, os.path.join(args.output_dir, engine_name))
 
-def build_decoder(model):
+def build_decoder(model, args):
     model_metadata = model['dims']
     model_params = model['model_state_dict']
-    
-    # debug
-    logger.set_level('verbose')
+    vocab_size = model_metadata['n_vocab']
+    hidden_states = model_metadata['n_text_state']
+    num_heads = model_metadata['n_text_head']
+    num_layers = model_metadata['n_text_layer']
+    num_text_ctx = model_metadata['n_text_ctx']
+    num_audio = 1
+    num_audio_ctx = model_metadata['n_audio_ctx']
+    max_batch_size = 1
+
+    positional_embedding = model['model_state_dict']['decoder.positional_embedding']
+    positional_embedding = positional_embedding.numpy()
+    np.save(os.path.join(args.output_dir, 'positional_embedding.npy'), positional_embedding)
 
     builder = Builder()
 
     builder_config = builder.create_builder_config(
-        name = MODEL_ENCODER_NAME,
-        precision = 'float16'
+        name = MODEL_DECODER_NAME,
+        precision = 'float16',
+        tensor_parallel=1,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        num_audio=num_audio,
+        num_audio_ctx=num_audio_ctx,
+        num_text_ctx=num_text_ctx,
+        hidden_size=hidden_states,
+        vocab_size=vocab_size,
+        max_batch_size=max_batch_size,
     )
     
     tensorrt_llm_whisper_decoder = tensorrt_llm.models.WhisperDecoder(
@@ -137,14 +210,22 @@ def build_decoder(model):
     
     network = builder.create_network()
     
+    max_batch_size = args.max_batch_size
+    max_input_len = args.max_input_len
+    max_new_tokens = args.max_output_len
+    max_beam_width = args.max_beam_width
+    
     with net_guard(network):
         # print(tensorrt_llm_whisper.named_parameters())
         # network.set_named_parameters(tensorrt_llm_whisper_decoder.named_parameters())
 
-        inputs = tensorrt_llm_whisper_decoder.prepare_inputs(256,
-                                                 200,
-                                                 200, True,
-                                                 1)
+        inputs = tensorrt_llm_whisper_decoder.prepare_inputs(
+            max_batch_size,
+            max_input_len,
+            max_new_tokens,
+            max_beam_width,
+            args.use_gpt_attention_plugin
+        )
         
         tensorrt_llm_whisper_decoder(*inputs)
     
@@ -155,25 +236,35 @@ def build_decoder(model):
     engine = None
     engine_name = get_engine_name(MODEL_DECODER_NAME, 'float16', 1, 0)
 
+    if args.use_gemm_plugin:
+        network.plugin_config.set_gemm_plugin(dtype=args.use_gemm_plugin)
+    if args.use_layernorm_plugin:
+        network.plugin_config.set_layernorm_plugin(
+            dtype=args.use_layernorm_plugin)
+    if args.use_gpt_attention_plugin:
+        network.plugin_config.set_gpt_attention_plugin(
+            dtype=args.use_gpt_attention_plugin)
+
     engine = builder.build_engine(network, builder_config)
 
-    config_path = os.path.join('./', 'config.json')
+    config_path = os.path.join(args.output_dir, 'decoder_config.json')
     builder.save_config(builder_config, config_path)
 
-    serialize_engine(engine, os.path.join('./', engine_name))
+    serialize_engine(engine, os.path.join(args.output_dir, engine_name))
 
-def build_crossattn_kv_linear(model):
+def build_crossattn_kv_linear(model, args):
     model_metadata = model['dims']
     model_params = model['model_state_dict']
-    
-    # debug
-    logger.set_level('verbose')
+    num_heads = model_metadata['n_text_head']
+    num_layers = model_metadata['n_text_layer']
 
     builder = Builder()
 
     builder_config = builder.create_builder_config(
-        name = MODEL_ENCODER_NAME,
-        precision = 'float16'
+        name = MODEL_CROSSATTN_NAME,
+        precision = 'float16',
+        num_layers=num_layers,
+        num_heads=num_heads,
     )
     
     tensorrt_llm_whisper_crossattn = tensorrt_llm.models.CrossAttn_KV(
@@ -202,15 +293,29 @@ def build_crossattn_kv_linear(model):
     engine = None
     engine_name = get_engine_name(MODEL_CROSSATTN_NAME, 'float16', 1, 0)
 
+    if args.use_layernorm_plugin:
+        network.plugin_config.set_layernorm_plugin(
+            dtype=args.use_layernorm_plugin)
+    if args.use_gpt_attention_plugin:
+        network.plugin_config.set_gpt_attention_plugin(
+            dtype=args.use_gpt_attention_plugin)
+
     engine = builder.build_engine(network, builder_config)
 
-    config_path = os.path.join('./', 'config.json')
+    config_path = os.path.join(args.output_dir, 'cross_attn_config.json')
     builder.save_config(builder_config, config_path)
 
-    serialize_engine(engine, os.path.join('./', engine_name))
+    serialize_engine(engine, os.path.join(args.output_dir, engine_name))
+
+def run_build(args=None):
+    args = parse_arguments(args)
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+    
+    model = torch.load(args.model_dir)
+    build_encoder(model, args)
+    build_decoder(model, args)
+    build_crossattn_kv_linear(model, args)
 
 if __name__ == '__main__':
-    model = torch.load("large-v2.pt")
-    build_encoder(model)
-    build_decoder(model)
-    build_crossattn_kv_linear(model)
+    run_build()
