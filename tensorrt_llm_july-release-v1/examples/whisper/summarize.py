@@ -85,16 +85,7 @@ def main(args):
     
     del checkpoint
 
-    engine_dir = Path(args.engine_dir)
-    config_path = engine_dir / 'config.json'
-    with open(config_path, 'r') as f:
-        config = json.load(f)
-
-    dtype = config['builder_config']['precision']
-    world_size = config['builder_config']['tensor_parallel']
-    assert world_size == tensorrt_llm.mpi_world_size(), \
-        f'Engine world size ({world_size}) != Runtime world size ({tensorrt_llm.mpi_world_size()})'
-
+    world_size = 1
     runtime_rank = tensorrt_llm.mpi_rank()
     runtime_mapping = tensorrt_llm.Mapping(world_size, runtime_rank)
     torch.cuda.set_device(runtime_rank % runtime_mapping.gpus_per_node)
@@ -105,20 +96,14 @@ def main(args):
     
     model_metadata.update({'n_audio': 1})
     
+    engine_dir = Path(args.engine_dir)
+    
     whisper_encoding = WhisperEncoding(
-        engine_dir / get_engine_name('whisper_encoder', dtype, world_size, runtime_rank),
-        'float16'
+        engine_dir,
     )
 
     whisper_decoding = WhisperDecoding(
-        engine_dir / get_engine_name('whisper_decoder', dtype, world_size, runtime_rank),
-        engine_dir / get_engine_name('whsiper_crossattn', dtype, world_size, runtime_rank),
-        'float16',
-        True,
-        'en',
-        'transcribe',
-        model_metadata,
-        positional_embedding
+        engine_dir,
     )
     output_torch = []
     output_tensorrt_llm = []
@@ -191,7 +176,7 @@ if __name__ == '__main__':
                         choices=['fp16'],
                         default='fp16')
     parser.add_argument('--log_level', type=str, default='info')
-    parser.add_argument('--engine_dir', type=str, default='./')
+    parser.add_argument('--engine_dir', type=str, default='whisper_outputs')
     parser.add_argument('--dataset_dir', type=str, default='./LibriSpeech/dev-clean-2/84/121550')
     parser.add_argument('--checkpoint_file', type=str, default='./large-v2.pt')
     parser.add_argument('--check_accuracy', action='store_true')
