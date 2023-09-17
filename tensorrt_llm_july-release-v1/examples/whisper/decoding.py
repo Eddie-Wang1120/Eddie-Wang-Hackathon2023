@@ -302,20 +302,15 @@ class GreedyDecoder(TokenDecoder):
 class WhisperDecoding:
     def __init__(
         self, 
-        # decoder_serialize_path, 
-        # cross_kv_serialize_path,
-        # dtype, 
-        # multilingual, 
-        # language, 
-        # task,
-        # model_metadata,
-        # positional_embedding
-        engine_dir
+        engine_dir,
+        only_torch: bool = False
         ):
         
         self.decoder_config = None
         self.cross_attn_config = None
-        self.decoder_session, self.cross_attn_session = self.get_session(engine_dir)
+        self.get_config(engine_dir)
+        if not only_torch:
+            self.decoder_session, self.cross_attn_session = self.get_session(engine_dir)
         self.tokenizer = self.get_tokenizer(True, 'en', 'transcribe')
 
         self.sot_sequence = self.tokenizer.sot_sequence
@@ -331,6 +326,8 @@ class WhisperDecoding:
         self.n_group = self.options.beam_size or self.options.best_of or 1
         self.sample_len: int = self.options.sample_len or self.decoder_config['num_text_ctx'] // 2
         self.sample_begin: int = len(self.initial_tokens)
+        
+        self.use_int8_kv_cache = self.decoder_config['use_int8_kv_cache']
         
         # self.positional_embedding = positional_embedding
         self.positional_embedding = torch.tensor(np.load(engine_dir / 'positional_embedding.npy')).to('cuda')
@@ -364,9 +361,8 @@ class WhisperDecoding:
         
         self.kv_cache = {}
         self.hooks = []
-        
-    def get_session(self, engine_dir):
-        # decoder
+    
+    def get_config(self, engine_dir):
         config_path = engine_dir / 'decoder_config.json'
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -375,13 +371,7 @@ class WhisperDecoding:
         decoder_config.update(config['plugin_config'])
         decoder_config.update(config['builder_config'])
         self.decoder_config = decoder_config
-        
-        serialize_path = engine_dir / get_engine_name('whisper_decoder', decoder_config['precision'], decoder_config['tensor_parallel'], 0)
-        
-        with open(serialize_path, 'rb') as f:
-            decoder_session = Session.from_serialized_engine(f.read())
-            
-        # cross_attn
+
         config_path = engine_dir / 'cross_attn_config.json'
         with open(config_path, 'r') as f:
             config = json.load(f)
@@ -391,7 +381,34 @@ class WhisperDecoding:
         cross_attn_config.update(config['builder_config'])
         self.cross_attn_config = cross_attn_config
         
-        serialize_path = engine_dir / get_engine_name('whsiper_crossattn', cross_attn_config['precision'], cross_attn_config['tensor_parallel'], 0)
+    
+    def get_session(self, engine_dir):
+        # decoder
+        # config_path = engine_dir / 'decoder_config.json'
+        # with open(config_path, 'r') as f:
+        #     config = json.load(f)
+        
+        # decoder_config = OrderedDict()
+        # decoder_config.update(config['plugin_config'])
+        # decoder_config.update(config['builder_config'])
+        # self.decoder_config = decoder_config
+        
+        serialize_path = engine_dir / get_engine_name('whisper_decoder', self.decoder_config['precision'], self.decoder_config['tensor_parallel'], 0)
+        
+        with open(serialize_path, 'rb') as f:
+            decoder_session = Session.from_serialized_engine(f.read())
+            
+        # cross_attn
+        # config_path = engine_dir / 'cross_attn_config.json'
+        # with open(config_path, 'r') as f:
+        #     config = json.load(f)
+        
+        # cross_attn_config = OrderedDict()
+        # cross_attn_config.update(config['plugin_config'])
+        # cross_attn_config.update(config['builder_config'])
+        # self.cross_attn_config = cross_attn_config
+        
+        serialize_path = engine_dir / get_engine_name('whsiper_crossattn', self.cross_attn_config['precision'], self.cross_attn_config['tensor_parallel'], 0)
         
         with open(serialize_path, 'rb') as f:
             cross_attn_session = Session.from_serialized_engine(f.read())
@@ -614,15 +631,27 @@ class WhisperDecoding:
         inputs.update({'positional_embedding':positional_embedding.type(torch.float16).contiguous()})
         output_list.append(TensorInfo('positional_embedding', str_dtype_to_trt("float16"), positional_embedding.shape))
 
-        if past_key_value is None:
-            for i in range(self.decoder_config['num_layers']):
-                past_key_value = torch.tensor((1,), dtype=torch.float16).to('cuda')
-                inputs.update({'past_key_value_'+str(i): past_key_value.contiguous()})
-                output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), torch.Size((1, 2, 20, 0, 64))))
+        if not self.use_int8_kv_cache:
+            if past_key_value is None:
+                for i in range(self.decoder_config['num_layers']):
+                    past_key_value = torch.tensor((1,), dtype=torch.float16).to('cuda')
+                    inputs.update({'past_key_value_'+str(i): past_key_value.contiguous()})
+                    output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), torch.Size((1, 2, 20, 0, 64))))
+            else:
+                for i in range(self.decoder_config['num_layers']):
+                    inputs.update({'past_key_value_'+str(i): past_key_value[i].contiguous()})
+                    output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), past_key_value[i].shape))
         else:
-            for i in range(self.decoder_config['num_layers']):
-                inputs.update({'past_key_value_'+str(i): past_key_value[i].contiguous()})
-                output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('float16'), past_key_value[i].shape))
+            if past_key_value is None:
+                for i in range(self.decoder_config['num_layers']):
+                    past_key_value = torch.tensor((1,), dtype=torch.int8).to('cuda')
+                    inputs.update({'past_key_value_'+str(i): past_key_value.contiguous()})
+                    output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('int8'), torch.Size((1, 2, 20, 0, 64))))
+            else:
+                for i in range(self.decoder_config['num_layers']):
+                    inputs.update({'past_key_value_'+str(i): past_key_value[i].contiguous()})
+                    output_list.append(TensorInfo('past_key_value_'+str(i), str_dtype_to_trt('int8'), past_key_value[i].shape))
+
 
         for i in range(self.decoder_config['num_layers']):
             inputs.update({'cross_past_key_value_'+str(i): cross_past_key_value[i].contiguous()})
@@ -637,7 +666,6 @@ class WhisperDecoding:
                                 device='cuda')
                 for t in output_info
         }
-
         # Execute model inference
         stream = torch.cuda.current_stream()
         

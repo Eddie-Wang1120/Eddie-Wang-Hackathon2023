@@ -8,6 +8,7 @@ from ...layers import Linear, Conv2d, Conv1d, LayerNorm, Attention, Gelu, Embedd
 from ...module import Module, ModuleList
 from ...parameter import Parameter
 from ...layers.attention import AttentionMaskType
+from ...quantization import QuantMode
 
 import tensorrt as trt
 from collections import OrderedDict
@@ -21,6 +22,7 @@ class ResidualAttentionBlock(Module):
                  n_ctx : int,
                  dtype,
                  cross_attention: bool = False,
+                 quant_mode: QuantMode = QuantMode(0),
                  mask_type: AttentionMaskType = AttentionMaskType.padding
                  
                  ):
@@ -33,7 +35,8 @@ class ResidualAttentionBlock(Module):
             n_ctx,
             bias=True,
             dtype=dtype,
-            attention_mask_type=mask_type
+            attention_mask_type=mask_type,
+            use_int8_kv_cache=quant_mode.has_int8_kv_cache()
         )
 
         self.cross_attn = (
@@ -216,6 +219,7 @@ class WhisperDecoder(Module):
                  n_head: int, 
                  n_layer: int, 
                  dtype,
+                 quant_mode=QuantMode(0),
                  mask_type = AttentionMaskType.causal):
         super().__init__()
         
@@ -230,6 +234,7 @@ class WhisperDecoder(Module):
                                    n_ctx, 
                                    dtype=dtype,
                                    cross_attention=True,
+                                   quant_mode=quant_mode,
                                    mask_type=mask_type) for _ in range(n_layer)
         ])
         
@@ -238,6 +243,14 @@ class WhisperDecoder(Module):
         self.ln = LayerNorm(n_state)
         
         self.token_embedding_weight = Parameter(shape=(n_vocab, n_state), dtype=dtype)
+    
+        self.dtype = dtype
+        if quant_mode.has_int8_kv_cache():
+            self.kv_type = str_dtype_to_trt('int8')
+        else:
+            self.kv_type = self.dtype
+        
+        self.quant_mode = quant_mode
     
     def forward(self, 
                 x: RaggedTensor,
@@ -294,7 +307,7 @@ class WhisperDecoder(Module):
         
         if use_cache:
             for i, present in enumerate(presents):
-                present.mark_output(f'present_key_value_{i}', self.dtype)
+                present.mark_output(f'present_key_value_{i}', self.kv_type)
             return (x, presents)
         
         return x
@@ -380,7 +393,7 @@ class WhisperDecoder(Module):
         
         for i in range(self.n_layer):
             kv = Tensor(name=f'past_key_value_'+str(i),
-                    dtype=trt.float16,
+                    dtype=self.kv_type,
                     shape=[1, 2, 20, -1, 64],
                     is_network_input=True,
                     dim_range=kv_dim_range)

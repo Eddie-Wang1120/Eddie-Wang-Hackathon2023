@@ -20,6 +20,8 @@ from weight import load_encoder_weight, load_decoder_weight, load_crossattn_line
 
 from collections import OrderedDict
 
+from tensorrt_llm.quantization import QuantMode
+
 MODEL_ENCODER_NAME = "whisper_encoder"
 MODEL_DECODER_NAME = "whisper_decoder"
 MODEL_CROSSATTN_NAME = "whsiper_crossattn"
@@ -43,6 +45,7 @@ def parse_arguments(args):
                         default=1,
                         help='world size, only support tensor parallelism now')
     parser.add_argument('--model_dir', type=str, default="large-v2.pt")
+    parser.add_argument('--quantize_dir', type=str, default="quantize/1-gpu")
     parser.add_argument('--dtype',
                         type=str,
                         default='float16',
@@ -89,6 +92,30 @@ def parse_arguments(args):
         help=
         'The path to save the serialized engine files, timing cache file and model configs'
     )
+    parser.add_argument(
+        '--use_weight_only',
+        default=False,
+        action="store_true",
+        help='Quantize weights for the various GEMMs to INT4/INT8.'
+        'See --weight_only_precision to set the precision')
+    parser.add_argument(
+        '--weight_only_precision',
+        const='int8',
+        type=str,
+        nargs='?',
+        default='int8',
+        choices=['int8', 'int4'],
+        help=
+        'Define the precision for the weights when using weight-only quantization.'
+        'You must also use --use_weight_only for that argument to have an impact.'
+    )
+    parser.add_argument(
+        '--int8_kv_cache',
+        default=False,
+        action="store_true",
+        help=
+        'By default, we use dtype for KV cache. int8_kv_cache chooses int8 quantization for KV'
+    )
 
     args = parser.parse_args(args)
     logger.set_level(args.log_level)
@@ -102,6 +129,15 @@ def parse_arguments(args):
                 f"plugin_arg is None, setting it as {args.dtype} automatically."
             )
             setattr(args, plugin_arg, args.dtype)
+
+    if args.use_weight_only:
+        args.quant_mode = QuantMode.use_weight_only(
+            args.weight_only_precision == 'int4')
+    else:
+        args.quant_mode = QuantMode(0)
+
+    if args.int8_kv_cache:
+        args.quant_mode = args.quant_mode.set_int8_kv_cache()
 
     return args
 
@@ -185,7 +221,7 @@ def build_decoder(model, args):
 
     builder_config = builder.create_builder_config(
         name = MODEL_DECODER_NAME,
-        precision = 'float16',
+        precision=args.dtype,
         tensor_parallel=1,
         num_layers=num_layers,
         num_heads=num_heads,
@@ -195,6 +231,9 @@ def build_decoder(model, args):
         hidden_size=hidden_states,
         vocab_size=vocab_size,
         max_batch_size=max_batch_size,
+        use_int8_kv_cache=args.quant_mode.has_int8_kv_cache(),
+        int8=(args.quant_mode.has_act_and_weight_quant()
+                  or args.quant_mode.has_int8_kv_cache()),
     )
     
     tensorrt_llm_whisper_decoder = tensorrt_llm.models.WhisperDecoder(
@@ -203,13 +242,18 @@ def build_decoder(model, args):
         model_metadata['n_text_state'],
         model_metadata['n_text_head'],
         model_metadata['n_text_layer'],
-        str_dtype_to_trt('float16')
+        str_dtype_to_trt(args.dtype),
+        quant_mode=args.quant_mode,
     )
 
-    load_decoder_weight(tensorrt_llm_whisper_decoder, model_params, model_metadata['n_text_layer'])
+    load_decoder_weight(
+        tensorrt_llm_whisper_decoder, 
+        model_params, 
+        model_metadata['n_text_layer'],
+        args.quantize_dir)
     
     network = builder.create_network()
-    
+
     max_batch_size = args.max_batch_size
     max_input_len = args.max_input_len
     max_new_tokens = args.max_output_len
@@ -231,10 +275,10 @@ def build_decoder(model, args):
     
         for k, v in tensorrt_llm_whisper_decoder.named_network_outputs():
             network._mark_output(v, k,
-                             str_dtype_to_trt('float16'))
+                             str_dtype_to_trt(args.dtype))
 
     engine = None
-    engine_name = get_engine_name(MODEL_DECODER_NAME, 'float16', 1, 0)
+    engine_name = get_engine_name(MODEL_DECODER_NAME, args.dtype, 1, 0)
 
     if args.use_gemm_plugin:
         network.plugin_config.set_gemm_plugin(dtype=args.use_gemm_plugin)

@@ -4,6 +4,8 @@ libs
 tensorrt_llm.egg-info
 *.engine
 *.pt
-LibriSpeech
+dev-clean-2
 no_plugin
 whisper_outputs
+quantize
+test.py

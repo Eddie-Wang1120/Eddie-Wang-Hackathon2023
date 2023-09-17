@@ -18,7 +18,6 @@ from decoding import WhisperDecoding
 
 from torch_model import ModelDimensions, Whisper
 
-from datasets import load_dataset, load_metric
 from normalizers import EnglishTextNormalizer
 
 from tqdm.notebook import tqdm

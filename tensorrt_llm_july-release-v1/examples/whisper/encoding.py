@@ -12,9 +12,11 @@ class WhisperEncoding:
     def __init__(
         self, 
         engine_dir,
+        only_torch : bool = False
         ):
         
-        self.session = self.get_session(engine_dir)
+        if not only_torch:
+            self.session = self.get_session(engine_dir)
         self.dtype = 'float16'
 
     def get_session(self, engine_dir):

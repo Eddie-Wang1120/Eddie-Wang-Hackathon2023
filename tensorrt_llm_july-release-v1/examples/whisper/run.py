@@ -46,7 +46,14 @@ def generate(
     mel = mel.unsqueeze(0)
     
     engine_dir = Path(engine_dir)
-    
+    # serialize_path = engine_dir / get_engine_name('whisper_decoder', 'float16', 1, 0)
+        
+    # with open(serialize_path, 'rb') as f:
+    #     decoder_session = Session.from_serialized_engine(f.read())
+
+    # print(decoder_session._print_io_info())
+    # asdasdasfsa
+
     whisper_encoding = WhisperEncoding(
         engine_dir,
     )
