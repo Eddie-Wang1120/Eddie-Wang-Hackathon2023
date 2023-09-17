@@ -30,7 +30,7 @@ def sinusoids(length, channels, max_timescale=10000):
     return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
 
 def trans_weight(weight):
-    return np.ascontiguousarray(weight.numpy())
+    return np.ascontiguousarray(weight)
 
 def load_encoder_weight(tensorrt_llm_whisper: WhisperEncoder,
                 model_metadata : dict,
@@ -71,12 +71,12 @@ def load_encoder_weight(tensorrt_llm_whisper: WhisperEncoder,
         tensorrt_llm_whisper.blocks[i].mlp_ln.weight.value = model_params['encoder.blocks.'+str(i)+'.mlp_ln.weight'].numpy()
         tensorrt_llm_whisper.blocks[i].mlp_ln.bias.value = model_params['encoder.blocks.'+str(i)+'.mlp_ln.bias'].numpy()
     
-        tensorrt_llm_whisper.blocks[i].mlp1.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.weight'])
-        tensorrt_llm_whisper.blocks[i].mlp1.bias.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.bias'])
+        tensorrt_llm_whisper.blocks[i].mlp1.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.weight'].numpy())
+        tensorrt_llm_whisper.blocks[i].mlp1.bias.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.bias'].numpy())
         # tensorrt_llm_whisper.blocks[0].mlp1.matmul_trans_weight = False
 
-        tensorrt_llm_whisper.blocks[i].mlp2.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.weight'])
-        tensorrt_llm_whisper.blocks[i].mlp2.bias.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.bias'])
+        tensorrt_llm_whisper.blocks[i].mlp2.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.weight'].numpy())
+        tensorrt_llm_whisper.blocks[i].mlp2.bias.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.bias'].numpy())
 
     tensorrt_llm_whisper.ln_post.weight.value = model_params['encoder.ln_post.weight'].numpy()
     tensorrt_llm_whisper.ln_post.bias.value = model_params['encoder.ln_post.bias'].numpy()
@@ -141,8 +141,8 @@ def load_decoder_weight(
         tensorrt_llm_whisper.blocks[i].cross_attn_ln.weight.value = model_params['decoder.blocks.'+str(i)+'.cross_attn_ln.weight'].numpy()
         tensorrt_llm_whisper.blocks[i].cross_attn_ln.bias.value = model_params['decoder.blocks.'+str(i)+'.cross_attn_ln.bias'].numpy()
 
-        tensorrt_llm_whisper.blocks[i].cross_attn.q_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.query.weight'])
-        tensorrt_llm_whisper.blocks[i].cross_attn.q_linear.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.query.bias'])
+        tensorrt_llm_whisper.blocks[i].cross_attn.q_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.query.weight'].numpy())
+        tensorrt_llm_whisper.blocks[i].cross_attn.q_linear.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.query.bias'].numpy())
 
         tensorrt_llm_whisper.blocks[i].cross_attn.dense.weight.value = model_params['decoder.blocks.'+str(i)+'.cross_attn.out.weight'].numpy()
         tensorrt_llm_whisper.blocks[i].cross_attn.dense.bias.value = model_params['decoder.blocks.'+str(i)+'.cross_attn.out.bias'].numpy()
@@ -151,12 +151,12 @@ def load_decoder_weight(
         tensorrt_llm_whisper.blocks[i].mlp_ln.weight.value = model_params['decoder.blocks.'+str(i)+'.mlp_ln.weight'].numpy()
         tensorrt_llm_whisper.blocks[i].mlp_ln.bias.value = model_params['decoder.blocks.'+str(i)+'.mlp_ln.bias'].numpy()
     
-        tensorrt_llm_whisper.blocks[i].mlp1.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.0.weight'])
-        tensorrt_llm_whisper.blocks[i].mlp1.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.0.bias'])
+        tensorrt_llm_whisper.blocks[i].mlp1.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.0.weight'].numpy())
+        tensorrt_llm_whisper.blocks[i].mlp1.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.0.bias'].numpy())
         # tensorrt_llm_whisper.blocks[0].mlp1.matmul_trans_weight = False
 
-        tensorrt_llm_whisper.blocks[i].mlp2.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.2.weight'])
-        tensorrt_llm_whisper.blocks[i].mlp2.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.2.bias'])
+        tensorrt_llm_whisper.blocks[i].mlp2.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.2.weight'].numpy())
+        tensorrt_llm_whisper.blocks[i].mlp2.bias.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.mlp.2.bias'].numpy())
 
     tensorrt_llm_whisper.ln.weight.value = model_params['decoder.ln.weight'].numpy()
     tensorrt_llm_whisper.ln.bias.value = model_params['decoder.ln.bias'].numpy()
@@ -169,10 +169,10 @@ def load_crossattn_linear_weight(tensorrt_llm_whisper: CrossAttn_KV,
     tensorrt_llm.logger.info('Loading CrossAttn weights from PT...')
     
     for i in range(n_layer):
-        tensorrt_llm_whisper.blocks[i].k_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'])
+        tensorrt_llm_whisper.blocks[i].k_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'].numpy())
 
-        tensorrt_llm_whisper.blocks[i].v_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'])
-        tensorrt_llm_whisper.blocks[i].v_linear.weight.bias = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.bias'])
+        tensorrt_llm_whisper.blocks[i].v_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'].numpy())
+        tensorrt_llm_whisper.blocks[i].v_linear.weight.bias = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.bias'].numpy())
 
 # model = torch.load("large-v2.pt")
 

@@ -358,8 +358,8 @@ def run_build(args=None):
     
     model = torch.load(args.model_dir)
     build_encoder(model, args)
-    build_decoder(model, args)
-    build_crossattn_kv_linear(model, args)
+    # build_decoder(model, args)
+    # build_crossattn_kv_linear(model, args)
 
 if __name__ == '__main__':
     run_build()

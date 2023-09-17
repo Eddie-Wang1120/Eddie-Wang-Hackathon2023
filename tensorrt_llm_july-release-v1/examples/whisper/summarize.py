@@ -176,7 +176,7 @@ if __name__ == '__main__':
                         default='fp16')
     parser.add_argument('--log_level', type=str, default='info')
     parser.add_argument('--engine_dir', type=str, default='whisper_outputs')
-    parser.add_argument('--dataset_dir', type=str, default='./LibriSpeech/dev-clean-2/84/121550')
+    parser.add_argument('--dataset_dir', type=str, default='./LibriSpeech/test')
     parser.add_argument('--checkpoint_file', type=str, default='./large-v2.pt')
     parser.add_argument('--check_accuracy', action='store_true')
     parser.add_argument('--tensorrt_llm_rouge1_threshold',

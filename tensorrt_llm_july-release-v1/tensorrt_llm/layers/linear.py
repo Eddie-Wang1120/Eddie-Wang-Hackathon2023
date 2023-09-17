@@ -138,3 +138,42 @@ class RowLinear(Module):
             x = x + self.bias.value
 
         return x
+
+# class RowLinear(Module):
+
+#     def __init__(self,
+#                  in_features,
+#                  out_features,
+#                  bias=True,
+#                  dtype=None,
+#                  tp_group=None,
+#                  tp_size=1):
+#         super().__init__()
+#         self.in_features = in_features // tp_size
+#         self.out_features = out_features
+#         self.dtype = dtype
+
+#         self.weight = Parameter(shape=(self.out_features, self.in_features),
+#                                 dtype=dtype)
+
+#         if bias:
+#             self.bias = Parameter(shape=(self.out_features, ), dtype=dtype)
+#         else:
+#             self.register_parameter('bias', None)
+
+#         self.tp_group = tp_group
+#         self.tp_size = tp_size
+
+#     def forward(self, x):
+#         if default_net().plugin_config.gemm_plugin:
+#             x = _gemm_plugin(x, self.weight.value, transb=True)
+#         else:
+#             x = matmul(x, self.weight.value, transb=True)
+
+#         if self.tp_size > 1 and self.tp_group is not None:
+#             x = allreduce(x, self.tp_group)
+
+#         if self.bias is not None:
+#             x = x + self.bias.value
+
+#         return x
