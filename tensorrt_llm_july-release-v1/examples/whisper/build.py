@@ -10,6 +10,7 @@ from tensorrt_llm.builder import Builder
 from tensorrt_llm.network import net_guard
 from tensorrt_llm.functional import Tensor, RaggedTensor
 from tensorrt_llm.logger import logger
+from tensorrt_llm.models import weight_only_quantize
 
 from tensorrt_llm import str_dtype_to_trt
 
@@ -51,7 +52,7 @@ def parse_arguments(args):
                         default='float16',
                         choices=['float16', 'float32', 'bfloat16'])
     parser.add_argument('--log_level', type=str, default='info')
-    parser.add_argument('--max_batch_size', type=int, default=1)
+    parser.add_argument('--max_batch_size', type=int, default=256)
     parser.add_argument('--max_input_len', type=int, default=200)
     parser.add_argument('--max_output_len', type=int, default=200)
     parser.add_argument('--max_beam_width', type=int, default=1)
@@ -211,7 +212,6 @@ def build_decoder(model, args):
     num_text_ctx = model_metadata['n_text_ctx']
     num_audio = 1
     num_audio_ctx = model_metadata['n_audio_ctx']
-    max_batch_size = 1
 
     positional_embedding = model['model_state_dict']['decoder.positional_embedding']
     positional_embedding = positional_embedding.numpy()
@@ -230,7 +230,7 @@ def build_decoder(model, args):
         num_text_ctx=num_text_ctx,
         hidden_size=hidden_states,
         vocab_size=vocab_size,
-        max_batch_size=max_batch_size,
+        max_batch_size=args.max_batch_size,
         use_int8_kv_cache=args.quant_mode.has_int8_kv_cache(),
         int8=(args.quant_mode.has_act_and_weight_quant()
                   or args.quant_mode.has_int8_kv_cache()),
@@ -246,6 +246,10 @@ def build_decoder(model, args):
         quant_mode=args.quant_mode,
     )
 
+    if args.use_weight_only:
+        tensorrt_llm_whisper_decoder = weight_only_quantize(tensorrt_llm_whisper_decoder,
+                                                args.quant_mode)
+
     load_decoder_weight(
         tensorrt_llm_whisper_decoder, 
         model_params, 
@@ -258,7 +262,11 @@ def build_decoder(model, args):
     max_input_len = args.max_input_len
     max_new_tokens = args.max_output_len
     max_beam_width = args.max_beam_width
-    
+
+    if args.use_weight_only:
+        network.plugin_config.set_weight_only_quant_matmul_plugin(
+            dtype=args.dtype)
+
     with net_guard(network):
         # print(tensorrt_llm_whisper.named_parameters())
         # network.set_named_parameters(tensorrt_llm_whisper_decoder.named_parameters())
@@ -277,9 +285,6 @@ def build_decoder(model, args):
             network._mark_output(v, k,
                              str_dtype_to_trt(args.dtype))
 
-    engine = None
-    engine_name = get_engine_name(MODEL_DECODER_NAME, args.dtype, 1, 0)
-
     if args.use_gemm_plugin:
         network.plugin_config.set_gemm_plugin(dtype=args.use_gemm_plugin)
     if args.use_layernorm_plugin:
@@ -288,6 +293,9 @@ def build_decoder(model, args):
     if args.use_gpt_attention_plugin:
         network.plugin_config.set_gpt_attention_plugin(
             dtype=args.use_gpt_attention_plugin)
+
+    engine = None
+    engine_name = get_engine_name(MODEL_DECODER_NAME, args.dtype, 1, 0)
 
     engine = builder.build_engine(network, builder_config)
 
@@ -358,8 +366,8 @@ def run_build(args=None):
     
     model = torch.load(args.model_dir)
     build_encoder(model, args)
-    # build_decoder(model, args)
-    # build_crossattn_kv_linear(model, args)
+    build_decoder(model, args)
+    build_crossattn_kv_linear(model, args)
 
 if __name__ == '__main__':
     run_build()

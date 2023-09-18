@@ -76,16 +76,6 @@ class ResidualAttentionBlock(Module):
         hidden_states = RaggedTensor.from_row_lengths(hidden_states,
                                           row_length,
                                           max_row_length)
-        
-        # x = (self.attn(hidden_states, 
-        #                attention_mask=mask,
-        #                past_key_value=multi_kv_cache,
-        #                use_cache = use_cache
-        #                )).data + residual1
-
-        # self.register_network_output("before_mul_attn", hidden_states.data)
-        # self.register_network_output("mask", mask)
-        # self.register_network_output("kv_cache", multi_kv_cache)
 
         attention_output = self.attn(hidden_states, 
                        attention_mask=mask,
@@ -100,11 +90,7 @@ class ResidualAttentionBlock(Module):
         if use_cache:
             attention_output, presents = attention_output
         
-        # self.register_network_output("after_mul_attn", attention_output.data)
-        
         x = attention_output.data + residual1
-        
-        # self.register_network_output("after_mul_attn_add", x)
 
         if self.cross_attn:
             cross_residual = x
@@ -324,7 +310,7 @@ class WhisperDecoder(Module):
         
         max_len = max_input_len + max_output_len
         
-        bb_range = [1, 1, max_batch_size * max_beam_width]
+        bb_range = [1, 1, max_batch_size]
         mask_len_range = [1, 1, max_len + 1]
         inlen_range = [1, 1, max_input_len]
         max_len_range = [0, (max_len + 1) // 2 + 1, max_len + 1]
@@ -531,18 +517,6 @@ class KVLinearBlock(Module):
         inflated_value = value.view(key_inflated_shape,
                                             zero_is_placeholder=False)
         cross_past_key_value = concat([inflated_key, inflated_value], dim=1)
-
-        # if self.use_int8_kv_cache:
-
-        #     def quantize_tensor(x, scale):
-        #         scaled = x * scale
-        #         rounded = round(scaled)
-        #         clipped = clip(rounded, -128, 127)
-        #         quantized = cast(clipped, 'int8')
-        #         return quantized
-
-        #     cross_past_key_value = quantize_tensor(
-        #         cross_past_key_value, self.kv_orig_quant_scale.value)
 
         return cross_past_key_value
 
