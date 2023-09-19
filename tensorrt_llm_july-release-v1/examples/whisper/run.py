@@ -62,17 +62,20 @@ def generate(
         engine_dir,
     )
     
-    begin_time = time.time()
+    #begin_time = time.time()
     
     audio_features = whisper_encoding.get_audio_features(mel)
     
     languages, language_probs = whisper_decoding.detect_language(audio_features)
 
-    tokens, sum_logprobs, no_speech_probs = whisper_decoding.main_loop(audio_features)
+    begin_time = time.time()
+    for _ in range(10):
+        tokens, sum_logprobs, no_speech_probs = whisper_decoding.main_loop(audio_features)
 
+    print("transcribe time " + str(time.time() - begin_time))
     result = whisper_decoding.post_process(tokens, sum_logprobs, no_speech_probs, audio_features, languages)
     
-    print("transcribe time " + str(time.time() - begin_time))
+    #print("transcribe time " + str(time.time() - begin_time))
     
     result = result[0]
     print(result.text)
