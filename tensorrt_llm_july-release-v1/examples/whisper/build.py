@@ -263,6 +263,15 @@ def build_decoder(model, args):
     max_new_tokens = args.max_output_len
     max_beam_width = args.max_beam_width
 
+    # if args.use_gemm_plugin:
+    #     network.plugin_config.set_gemm_plugin(dtype=args.use_gemm_plugin)
+    # if args.use_layernorm_plugin:
+    #     network.plugin_config.set_layernorm_plugin(
+    #         dtype=args.use_layernorm_plugin)
+    # if args.use_gpt_attention_plugin:
+    #     network.plugin_config.set_gpt_attention_plugin(
+    #         dtype=args.use_gpt_attention_plugin)
+        
     if args.use_weight_only:
         network.plugin_config.set_weight_only_quant_matmul_plugin(
             dtype=args.dtype)
