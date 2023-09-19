@@ -6,6 +6,11 @@ tensorrt_llm.egg-info
 *.pt
 dev-clean-2
 no_plugin
+has_plugin
+int8_kv_cache
+int8_weight_only
+weight_only
+test-clean
 whisper_outputs
 quantize
 test.py

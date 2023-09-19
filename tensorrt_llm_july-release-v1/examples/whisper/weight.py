@@ -258,6 +258,7 @@ def load_crossattn_linear_weight(tensorrt_llm_whisper: CrossAttn_KV,
     tensorrt_llm.logger.info('Loading CrossAttn weights from PT...')
     
     for i in range(n_layer):
+        
         tensorrt_llm_whisper.blocks[i].k_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'].numpy())
 
         tensorrt_llm_whisper.blocks[i].v_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'].numpy())

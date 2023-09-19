@@ -353,7 +353,9 @@ def build_crossattn_kv_linear(model, args):
 
     engine = None
     engine_name = get_engine_name(MODEL_CROSSATTN_NAME, 'float16', 1, 0)
-
+    
+    if args.use_gemm_plugin:
+        network.plugin_config.set_gemm_plugin(dtype=args.use_gemm_plugin)
     if args.use_layernorm_plugin:
         network.plugin_config.set_layernorm_plugin(
             dtype=args.use_layernorm_plugin)

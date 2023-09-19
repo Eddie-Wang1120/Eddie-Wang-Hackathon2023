@@ -101,7 +101,7 @@ class ProgArgs:
                             choices=["float32", "float16", "bfloat16"])
         parser.add_argument("--dataset_dir",
                             type=str,
-                            default='./LibriSpeech/test',
+                            default='./LibriSpeech/valid-clean',
                             help="cache dir to load the hugging face dataset")
         parser.add_argument("--engine_dir",
                             type=str,
