@@ -60,7 +60,7 @@ python3 summarize.py --engine_dir <engine目录> --test_torch --test_trt_llm
 
 #### 模型结构
 
-  ![image](./imgs/approach.png) 
+  ![image](./imgs/approach.png)   
 
 如图所示，whisper模型主要包括Encoder和Decoder两部分，包含Conv1d、GELU、self-attention、cross-attention以及MLP五种主要结构，其中又可以拆分为众多小算子。
 
@@ -89,7 +89,7 @@ python3 summarize.py --engine_dir <engine目录> --test_torch --test_trt_llm
 ##### 亮点五 ： 工程化的模型推理
   在这次whisper的模型推理实现过程中，并没有采用GenerationSession方法，用调用接口的方式去推理模型，而是将内部的session提取出来使用，用更加灵活的方法进行模型推理，为如何使用TensorRT-LLM提供了一种新思路。在run.py文件中，我并没有沿用gpt中的方法，而是使用两个类：WhisperEncoding类和WhisperDecoding类分别封装了Whisper进行Encoding和Decoding的过程，并将内部的方法放在encoding.py和decoding.py两个文件夹中。这样的工程化处理方式使得代码的逻辑非常清晰，且易于维护。
 
-  逻辑清晰的推理代码：
+  逻辑清晰的推理代码：  
   ![image](./imgs/run_py.png) 
 
 ### 开发与优化过程
@@ -99,13 +99,13 @@ python3 summarize.py --engine_dir <engine目录> --test_torch --test_trt_llm
 ##### Step 1
 首先在tensorr-llm/models中创建模型文件，并在__init__中注册（添加任何layer或module都需要在对应的__init__.py中注册），接着就可以在模型文件中搭建模型了。搭建的模型需要继承自Module类，并且实现__init__，forward和prepare_inputs三个方法。需要注意的是，一定需要有一个变量调用mark_output方法输出，不然网络无法建立。
 
-  模型搭建示例：
+  模型搭建示例：  
   ![image](./imgs/model_py.png) 
 
 ##### Step 2
 写好模型文件后，下一步需要在examples中创建模型文件夹，并在里面创建build.py文件。build.py文件需要调用模型文件中写好的模型。首先使用builder.create_builder_config()配置模型的基本信息，接着调用模型并传入已经训练好的权重，这里的权重需要新建立weight.py文件并配置好每一个算子的传入权重。传入权重后，tensorrt-llm通过一次推理得到网络的推理路线和推理权重，再用该网络build_engine即可得到优化后的engine，再序列化得到最后的模型。
 
-  模型build示例：
+  模型build示例：  
   ![image](./imgs/build_py.png) 
 
 ##### Step 3
@@ -132,7 +132,7 @@ weight_only量化主要需要注意的在weight.py文件中，其本身使用的
 ##### int8_kv_cache:
 实现int8_kv_cache前提是需要使用gpt-attention插件，即attention必须含有qkv这一linear算子。对没有将其合并的模型，可手动进行合并，合并后通过capture_activation_range方法得到算子的qmin和qmax，之后进行qat即可。需要注意的是，这里需要calibrator，因此需要验证集进行校准。
 
-  int8_kv_cache合并过程：
+  int8_kv_cache合并过程：  
   ![image](./imgs/int8_kv_cache.png) 
 
 ### 优化效果
@@ -152,7 +152,7 @@ pytorch模型推理时显存占用约为11GB，未进行量化的tensorrt-llm模
 
 ### Bug报告
 #### 插件使用顺序导致tensorrt-llm运行失败  
-<https://github.com/NVIDIA/TensorRT/issues/1919>
+<https://github.com/NVIDIA/trt-samples-for-hackathon-cn/issues/95>
 
 
 ### 送分题答案
