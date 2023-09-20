@@ -37,6 +37,16 @@ def load_encoder_weight(tensorrt_llm_whisper: WhisperEncoder,
                 model_params : dict,
                 n_layer : int):
     tensorrt_llm.logger.info('Loading encoder weights from PT...')
+    
+    quant_mode = getattr(tensorrt_llm_whisper, 'quant_mode', QuantMode(0))
+    if quant_mode.is_int8_weight_only():
+        plugin_weight_only_quant_type = torch.int8
+    elif quant_mode.is_int4_weight_only():
+        plugin_weight_only_quant_type = torch.quint4x2
+
+    # Do we use INT4/INT8 weight-only?
+    use_weight_only = quant_mode.is_weight_only()
+    
     tensorrt_llm_whisper.positional_embedding.value = sinusoids(model_metadata['n_audio_ctx'], model_metadata['n_audio_state']).numpy()
 
     tensorrt_llm_whisper.conv1.weight.value = torch.unsqueeze(model_params['encoder.conv1.weight'], -1).numpy()
@@ -49,12 +59,32 @@ def load_encoder_weight(tensorrt_llm_whisper: WhisperEncoder,
         tensorrt_llm_whisper.blocks[i].attn_ln.weight.value = model_params['encoder.blocks.'+str(i)+'.attn_ln.weight'].numpy()
         tensorrt_llm_whisper.blocks[i].attn_ln.bias.value = model_params['encoder.blocks.'+str(i)+'.attn_ln.bias'].numpy()
     
-        fused_weight = torch.cat([
+        # fused_weight = torch.cat([
+        #     model_params['encoder.blocks.'+str(i)+'.attn.query.weight'],
+        #     model_params['encoder.blocks.'+str(i)+'.attn.key.weight'],
+        #     model_params['encoder.blocks.'+str(i)+'.attn.value.weight']
+        # ],  dim=0).numpy()
+        t = torch.cat([
             model_params['encoder.blocks.'+str(i)+'.attn.query.weight'],
             model_params['encoder.blocks.'+str(i)+'.attn.key.weight'],
             model_params['encoder.blocks.'+str(i)+'.attn.value.weight']
         ],  dim=0).numpy()
-        tensorrt_llm_whisper.blocks[i].attn.qkv.weight.value =  fused_weight
+        
+        if t is not None:
+            dst = tensorrt_llm_whisper.blocks[i].attn.qkv.weight
+            if use_weight_only:
+                processed_torch_weights, torch_weight_scales = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
+                    torch.tensor(np.ascontiguousarray(t.transpose(1, 0))), plugin_weight_only_quant_type)
+                # workaround for trt not supporting int8 inputs in plugins currently
+                dst.value = processed_torch_weights.view(
+                    dtype=torch.float32).numpy()
+                scales = tensorrt_llm_whisper.blocks[
+                    i].attn.qkv.per_channel_scale
+                scales.value = torch_weight_scales.numpy()
+            else:
+                dst.value = t
+        
+        # tensorrt_llm_whisper.blocks[i].attn.qkv.weight.value =  fused_weight
     
         bias_shape = model_params['encoder.blocks.'+str(i)+'.attn.query.bias'].shape
         fused_bias = torch.cat([
@@ -64,16 +94,58 @@ def load_encoder_weight(tensorrt_llm_whisper: WhisperEncoder,
         ],  dim=0).numpy()
         tensorrt_llm_whisper.blocks[i].attn.qkv.bias.value = fused_bias
     
-        tensorrt_llm_whisper.blocks[i].attn.dense.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.attn.out.weight'].numpy())
+        # tensorrt_llm_whisper.blocks[i].attn.dense.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.attn.out.weight'].numpy())
+        t = trans_weight(model_params['encoder.blocks.'+str(i)+'.attn.out.weight'].numpy())
+        if t is not None:
+            dst = tensorrt_llm_whisper.blocks[i].attn.dense.weight
+            if use_weight_only:
+                processed_torch_weights, torch_weight_scales = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
+                    torch.tensor(np.ascontiguousarray(t.transpose(1, 0))), plugin_weight_only_quant_type)
+                # workaround for trt not supporting int8 inputs in plugins currently
+                dst.value = processed_torch_weights.view(
+                    dtype=torch.float32).numpy()
+                scales = tensorrt_llm_whisper.blocks[
+                    i].attn.dense.per_channel_scale
+                scales.value = torch_weight_scales.numpy()
+            else:
+                dst.value = t
         tensorrt_llm_whisper.blocks[i].attn.dense.bias.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.attn.out.bias'].numpy())
     
         tensorrt_llm_whisper.blocks[i].mlp_ln.weight.value = model_params['encoder.blocks.'+str(i)+'.mlp_ln.weight'].numpy()
         tensorrt_llm_whisper.blocks[i].mlp_ln.bias.value = model_params['encoder.blocks.'+str(i)+'.mlp_ln.bias'].numpy()
     
-        tensorrt_llm_whisper.blocks[i].mlp1.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.weight'].numpy())
+        # tensorrt_llm_whisper.blocks[i].mlp1.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.weight'].numpy())
+        t = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.weight'].numpy())
+        if t is not None:
+            dst = tensorrt_llm_whisper.blocks[i].mlp1.weight
+            if use_weight_only:
+                processed_torch_weights, torch_weight_scales = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
+                    torch.tensor(np.ascontiguousarray(t.transpose(1, 0))), plugin_weight_only_quant_type)
+                # workaround for trt not supporting int8 inputs in plugins currently
+                dst.value = processed_torch_weights.view(
+                    dtype=torch.float32).numpy()
+                scales = tensorrt_llm_whisper.blocks[
+                    i].mlp1.per_channel_scale
+                scales.value = torch_weight_scales.numpy()
+            else:
+                dst.value = t
         tensorrt_llm_whisper.blocks[i].mlp1.bias.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.0.bias'].numpy())
 
-        tensorrt_llm_whisper.blocks[i].mlp2.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.weight'].numpy())
+        # tensorrt_llm_whisper.blocks[i].mlp2.weight.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.weight'].numpy())
+        t = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.weight'].numpy())
+        if t is not None:
+            dst = tensorrt_llm_whisper.blocks[i].mlp2.weight
+            if use_weight_only:
+                processed_torch_weights, torch_weight_scales = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
+                    torch.tensor(np.ascontiguousarray(t.transpose(1, 0))), plugin_weight_only_quant_type)
+                # workaround for trt not supporting int8 inputs in plugins currently
+                dst.value = processed_torch_weights.view(
+                    dtype=torch.float32).numpy()
+                scales = tensorrt_llm_whisper.blocks[
+                    i].mlp2.per_channel_scale
+                scales.value = torch_weight_scales.numpy()
+            else:
+                dst.value = t
         tensorrt_llm_whisper.blocks[i].mlp2.bias.value = trans_weight(model_params['encoder.blocks.'+str(i)+'.mlp.2.bias'].numpy())
 
     tensorrt_llm_whisper.ln_post.weight.value = model_params['encoder.ln_post.weight'].numpy()
@@ -256,12 +328,47 @@ def load_crossattn_linear_weight(tensorrt_llm_whisper: CrossAttn_KV,
                 model_params : dict,
                 n_layer : int):
     tensorrt_llm.logger.info('Loading CrossAttn weights from PT...')
-    
-    for i in range(n_layer):
-        
-        tensorrt_llm_whisper.blocks[i].k_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'].numpy())
+    quant_mode = getattr(tensorrt_llm_whisper, 'quant_mode', QuantMode(0))
+    if quant_mode.is_int8_weight_only():
+        plugin_weight_only_quant_type = torch.int8
+    elif quant_mode.is_int4_weight_only():
+        plugin_weight_only_quant_type = torch.quint4x2
 
-        tensorrt_llm_whisper.blocks[i].v_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'].numpy())
+    # Do we use INT4/INT8 weight-only?
+    use_weight_only = quant_mode.is_weight_only()
+
+    for i in range(n_layer):
+        t = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'].numpy())
+        if t is not None:
+            dst = tensorrt_llm_whisper.blocks[i].k_linear.weight
+            if use_weight_only:
+                processed_torch_weights, torch_weight_scales = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
+                    torch.tensor(np.ascontiguousarray(t.transpose(1, 0))), plugin_weight_only_quant_type)
+                # workaround for trt not supporting int8 inputs in plugins currently
+                dst.value = processed_torch_weights.view(
+                    dtype=torch.float32).numpy()
+                scales = tensorrt_llm_whisper.blocks[
+                    i].k_linear.per_channel_scale
+                scales.value = torch_weight_scales.numpy()
+            else:
+                dst.value = t
+        # tensorrt_llm_whisper.blocks[i].k_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.key.weight'].numpy())
+
+        t = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'].numpy())
+        if t is not None:
+            dst = tensorrt_llm_whisper.blocks[i].v_linear.weight
+            if use_weight_only:
+                processed_torch_weights, torch_weight_scales = torch.ops.fastertransformer.symmetric_quantize_last_axis_of_batched_matrix(
+                    torch.tensor(np.ascontiguousarray(t.transpose(1, 0))), plugin_weight_only_quant_type)
+                # workaround for trt not supporting int8 inputs in plugins currently
+                dst.value = processed_torch_weights.view(
+                    dtype=torch.float32).numpy()
+                scales = tensorrt_llm_whisper.blocks[
+                    i].v_linear.per_channel_scale
+                scales.value = torch_weight_scales.numpy()
+            else:
+                dst.value = t
+        # tensorrt_llm_whisper.blocks[i].v_linear.weight.value = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.weight'].numpy())
         tensorrt_llm_whisper.blocks[i].v_linear.weight.bias = trans_weight(model_params['decoder.blocks.'+str(i)+'.cross_attn.value.bias'].numpy())
 
 # model = torch.load("large-v2.pt")

@@ -9,6 +9,7 @@ no_plugin
 has_plugin
 int8_kv_cache
 int8_weight_only
+all_weight_only
 weight_only
 test-clean
 whisper_outputs

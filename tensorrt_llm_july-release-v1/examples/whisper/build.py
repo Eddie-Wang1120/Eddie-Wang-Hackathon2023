@@ -161,6 +161,7 @@ def build_encoder(model, args):
         num_heads=num_heads,
         hidden_size=hidden_states,
         max_batch_size=max_batch_size,
+        int8=args.quant_mode.has_act_and_weight_quant(),
     )
     
     tensorrt_llm_whisper_encoder = tensorrt_llm.models.WhisperEncoder(
@@ -172,10 +173,18 @@ def build_encoder(model, args):
         str_dtype_to_trt("float16")
     )
 
+    if args.use_weight_only:
+        tensorrt_llm_whisper_encoder = weight_only_quantize(tensorrt_llm_whisper_encoder,
+                                                args.quant_mode)
+
     load_encoder_weight(tensorrt_llm_whisper_encoder, model_metadata, model_params, model_metadata['n_audio_layer'])
     
     network = builder.create_network()
-    
+
+    if args.use_weight_only:
+        network.plugin_config.set_weight_only_quant_matmul_plugin(
+            dtype=args.dtype)
+
     with net_guard(network):
 
         inputs = tensorrt_llm_whisper_encoder.prepare_inputs()
@@ -277,8 +286,6 @@ def build_decoder(model, args):
             dtype=args.dtype)
 
     with net_guard(network):
-        # print(tensorrt_llm_whisper.named_parameters())
-        # network.set_named_parameters(tensorrt_llm_whisper_decoder.named_parameters())
 
         inputs = tensorrt_llm_whisper_decoder.prepare_inputs(
             max_batch_size,
@@ -326,19 +333,28 @@ def build_crossattn_kv_linear(model, args):
         precision = 'float16',
         num_layers=num_layers,
         num_heads=num_heads,
+        int8=args.quant_mode.has_act_and_weight_quant(),
     )
     
     tensorrt_llm_whisper_crossattn = tensorrt_llm.models.CrossAttn_KV(
         model_metadata['n_text_state'],
         model_metadata['n_text_head'],
         model_metadata['n_text_layer'],
-        str_dtype_to_trt('float16')
+        str_dtype_to_trt('float16'),
     )
+
+    if args.use_weight_only:
+        tensorrt_llm_whisper_crossattn = weight_only_quantize(tensorrt_llm_whisper_crossattn,
+                                                args.quant_mode)
 
     load_crossattn_linear_weight(tensorrt_llm_whisper_crossattn, model_params, model_metadata['n_text_layer'])
 
     network = builder.create_network()
-    
+
+    if args.use_weight_only:
+        network.plugin_config.set_weight_only_quant_matmul_plugin(
+            dtype=args.dtype)
+
     with net_guard(network):
         # print(tensorrt_llm_whisper.named_parameters())
         # network.set_named_parameters(tensorrt_llm_whisper_decoder.named_parameters())
