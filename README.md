@@ -1,4 +1,5 @@
 ## Whisper Model For Tensorrt-LLM
+![image](https://github.com/Eddie-Wang1120/Eddie-Wang-Hackthon2023/assets/81598289/fec1e8a8-eb89-4d53-ae2c-abbe92a3b16d)
 
 [![](https://img.shields.io/badge/阿里天池-TensorRT%20Hackathon%202023-blue)](https://tianchi.aliyun.com/competition/entrance/532108)
 [![](https://img.shields.io/badge/Github-TensorRT%20Hackathon%202023-blue)](https://github.com/NVIDIA/trt-samples-for-hackathon-cn/tree/master/Hackathon2023)
