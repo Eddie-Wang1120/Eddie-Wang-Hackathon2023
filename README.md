@@ -7,7 +7,7 @@
 ### 总述
 
 #### 题目介绍
-该项目为 NVIDIA TensorRT Hackathon 2023 参赛题目，比赛选题为用TensorRT-LLM实现新模型以及在模型上启用现有feature（2+4）。
+该项目为 NVIDIA TensorRT Hackathon 2023 参赛题目，比赛选题为用TensorRT-LLM实现新模型以及在模型上启用现有feature（2+4），项目代码由Eddie-Wang:pencil:完成。
 
 #### 模型介绍
 
@@ -117,7 +117,7 @@ python3 summarize.py --engine_dir <engine目录> --test_torch --test_trt_llm
 ##### Step 3
 得到序列化的模型后，需要简历run.py进行模型的推理。有两种方式可以进行该推理，如果模型和传统的LLM结构相似，可以使用tensorrt_llm.runtime.GenerationSession进行推理，需要注意的是传入的参数需要仔细考虑，防止结果出错。如果模型无法完全复用以上方法，也可以自己使用session = Session.from_serialized_engine进行模型推理，这样的优点是可以完全自定义推理的方式，便于工程化的实现。
 
-  session反序列化示例：  
+  session反序列化示例：   
   ![image](./imgs/run_py.png) 
 
 ##### Step 4
@@ -163,7 +163,7 @@ weight_only量化主要需要注意的在weight.py文件中，其本身使用的
 #### 推理精度
 <div align=center>
 
-|Model|Word Error Rate|
+|Model|Word Error Rate:arrow_down:|
 |--|--|
 |pytorch|4.19%|
 |trt-llm|3.91%|
@@ -179,7 +179,7 @@ weight_only量化主要需要注意的在weight.py文件中，其本身使用的
 ![image](./imgs/whisper_mem.png)  
 上图为各模型推理时所占显存空间。pytorch模型推理时显存占用约为11GB，未进行量化的TensorRT-LLM模型在推理时相比于原始模型显存占用下降约200MB，经过量化后的模型显存占用有大幅度的下降，约下降2GB，极大的降低了推理所需的显存需求。
 
-### Bug报告
+### Bug报告:bug:
 #### 插件使用顺序导致tensorrt-llm运行失败  
 <https://github.com/NVIDIA/trt-samples-for-hackathon-cn/issues/95>
 
