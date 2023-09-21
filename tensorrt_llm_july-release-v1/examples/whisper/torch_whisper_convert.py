@@ -133,10 +133,6 @@ def torch_whisper_converter(args: ProgArgs):
     model = model.to('cuda')
 
     engine_dir = Path(args.engine_dir)
-    # # load position_embedding from rank 0
-    # model = AutoModelForCausalLM.from_pretrained(args.in_file,
-    #                                              device_map="auto",
-    #                                              trust_remote_code=True)
     
     act_range = {}
     if args.smoothquant is not None or args.calibrate_kv_cache:
@@ -144,8 +140,6 @@ def torch_whisper_converter(args: ProgArgs):
             "TOKENIZERS_PARALLELISM", "false")
         act_range = capture_activation_range(
             model, engine_dir, args.dataset_dir)
-        # if args.smoothquant is not None:
-        #     smooth_gpt_model(model, act_range, args.smoothquant)
     
     
     pop_list = []
@@ -163,14 +157,10 @@ def torch_whisper_converter(args: ProgArgs):
                              'y': torch.cat((q_act_range['y'], k_act_range['y'], v_act_range['y']), dim=0),
                              'w': torch.cat((q_act_range['w'], k_act_range['w'], v_act_range['w']), dim=0)
                              }
-            # act_range[ft_key] = qkv_act_range
             add_list.append({ft_key : qkv_act_range})
             pop_list.append(q_key)
             pop_list.append(k_key)
             pop_list.append(v_key)
-            # act_range.pop(q_key)
-            # act_range.pop(k_key)
-            # act_range.pop(v_key)
     for add_item in add_list:
         act_range.update(add_item)
     for pop_name in pop_list:
@@ -180,8 +170,6 @@ def torch_whisper_converter(args: ProgArgs):
     config["whisper"] = {}
     for key in vars(args):
         config["whisper"][key] = f"{vars(args)[key]}"
-    # for k, v in vars(model.config).items():
-    #     config["whisper"][k] = f"{v}"
     config["whisper"]["storage_dtype"] = args.storage_type
     config["whisper"]["multi_query_mode"] = str(multi_query_mode)
     with open(saved_dir / "config.ini", 'w') as configfile:
@@ -209,20 +197,6 @@ def torch_whisper_converter(args: ProgArgs):
         if 'attn.query' in name or 'cross_attn.query' in name:
             param = concat_qkv_weight_bias(param, name, model)
             ft_name = ft_name.replace("query", "query_key_value")
-            # q_name = name.replace(".weight", "")
-            # k_name = name.replace("query", "key").replace(".weight", "")
-            # v_name = name.replace("query", "value").replace(".weight", "")
-            # q_act_range = act_range.get(q_name)
-            # k_act_range = act_range.get(k_name)
-            # v_act_range = act_range.get(v_name)
-            # print(k_name)
-            # print(k_act_range)
-            
-            # qkv_act_range = {'x': torch.cat((q_act_range['x'], k_act_range['x'], v_act_range['x']), dim=0),
-            #                  'y': torch.cat((q_act_range['y'], k_act_range['y'], v_act_range['y']), dim=0),
-            #                  'w': torch.cat((q_act_range['w'], k_act_range['w'], v_act_range['w']), dim=0)
-            #                  }
-            # print(qkv_act_range)
         
         starmap_args.append(
                 (0, saved_dir, infer_tp, ft_name, param.to(storage_type),

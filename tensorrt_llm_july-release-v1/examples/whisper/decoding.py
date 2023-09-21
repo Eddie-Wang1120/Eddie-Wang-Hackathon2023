@@ -320,9 +320,6 @@ class WhisperDecoding:
         self.sot_index = self.initial_tokens.index(self.tokenizer.sot)
         self.options = DecodingOptions()
         
-        # self.n_audio = model_metadata['n_audio']
-        # self.n_layer = model_metadata['n_text_layer']
-        # self.n_ctx = model_metadata['n_text_ctx']
         self.n_group = self.options.beam_size or self.options.best_of or 1
         self.sample_len: int = self.options.sample_len or self.decoder_config['num_text_ctx'] // 2
         self.sample_begin: int = len(self.initial_tokens)
@@ -352,11 +349,6 @@ class WhisperDecoding:
         # sequence ranker: implements how to rank a group of sampled sequences
         self.sequence_ranker = MaximumLikelihoodRanker(self.options.length_penalty)
 
-        # if self.options.beam_size is not None:
-        #     self.decoder = BeamSearchDecoder(
-        #         self.options.beam_size, self.tokenizer.eot, self.inference, self.options.patience
-        #     )
-        # else:
         self.decoder = GreedyDecoder(self.options.temperature, self.tokenizer.eot)
         
         self.kv_cache = {}
@@ -384,32 +376,16 @@ class WhisperDecoding:
     
     def get_session(self, engine_dir):
         # decoder
-        # config_path = engine_dir / 'decoder_config.json'
-        # with open(config_path, 'r') as f:
-        #     config = json.load(f)
         
-        # decoder_config = OrderedDict()
-        # decoder_config.update(config['plugin_config'])
-        # decoder_config.update(config['builder_config'])
-        # self.decoder_config = decoder_config
-        
-        serialize_path = engine_dir / get_engine_name('whisper_decoder', self.decoder_config['precision'], self.decoder_config['tensor_parallel'], 0)
-        
+        serialize_path = engine_dir / get_engine_name('whisper_decoder', self.decoder_config['precision'], 
+                                                      self.decoder_config['tensor_parallel'], 0)
         with open(serialize_path, 'rb') as f:
             decoder_session = Session.from_serialized_engine(f.read())
             
         # cross_attn
-        # config_path = engine_dir / 'cross_attn_config.json'
-        # with open(config_path, 'r') as f:
-        #     config = json.load(f)
         
-        # cross_attn_config = OrderedDict()
-        # cross_attn_config.update(config['plugin_config'])
-        # cross_attn_config.update(config['builder_config'])
-        # self.cross_attn_config = cross_attn_config
-        
-        serialize_path = engine_dir / get_engine_name('whsiper_crossattn', self.cross_attn_config['precision'], self.cross_attn_config['tensor_parallel'], 0)
-        
+        serialize_path = engine_dir / get_engine_name('whsiper_crossattn', self.cross_attn_config['precision'], 
+                                                      self.cross_attn_config['tensor_parallel'], 0)
         with open(serialize_path, 'rb') as f:
             cross_attn_session = Session.from_serialized_engine(f.read())
         
