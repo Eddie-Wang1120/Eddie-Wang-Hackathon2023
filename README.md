@@ -28,6 +28,7 @@
 在模型优化的过程中我使用了`tensorrt`、`plugin`、`cross_kv_cache_warping`、`int8_kv_cache`以及`weight_only`量化等手段，同时补充了TensorRT-llm中未提供支持的一些算子，如`cross_attention`以及`conv1d`，最终成功完成了推理优化，使TensorRT-llm对whisper的推理速度有较大提升。
 
 #### 运行步骤
+首先将whisper large-v2.pt模型拷贝至examples/whisper目录下  
 
 - 运行float16无插件版本：
 ```
@@ -49,7 +50,8 @@ bash run_weight_only.sh
 ```
 bash run_weight_only_int8_kv_cache.sh
 ```
-- 进行summarize效果比对
+- 进行summarize效果比对  
+将LibriSpeech test-clean数据集拷贝至examples/whisper/LibriSpeech目录下：
 ```
 python3 summarize.py --engine_dir <engine目录> --test_torch --test_trt_llm
 ```
